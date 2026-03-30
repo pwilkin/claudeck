@@ -33,6 +33,7 @@ import memoryRouter from "./server/routes/memory.js";
 import worktreesRouter from "./server/routes/worktrees.js";
 import skillsRouter from "./server/routes/skills.js";
 import { setupWebSocket } from "./server/ws-handler.js";
+import { closeAllSessions } from "./server/session-manager.js";
 import { setWss } from "./server/notification-logger.js";
 import { authMiddleware, verifyWsClient, isAuthEnabled, getToken, loginHandler, statusHandler } from "./server/auth.js";
 
@@ -219,9 +220,11 @@ setInterval(() => purgeOldNotifications(90), 24 * 60 * 60 * 1000);
 // Graceful shutdown
 process.on("SIGINT", () => {
   stopTelegramPoller();
+  closeAllSessions();
   process.exit(0);
 });
 process.on("SIGTERM", () => {
   stopTelegramPoller();
+  closeAllSessions();
   process.exit(0);
 });

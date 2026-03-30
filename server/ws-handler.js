@@ -22,6 +22,16 @@ import { buildMemoryPrompt, parseRememberCommand, saveExplicitMemories } from ".
 import { captureMemories, runMaintenance } from "./memory-extractor.js";
 import { createWorktree, generateBranchName, getCurrentBranch, autoCommitWorktree, getWorktreeDiffStats } from "./utils/git-worktree.js";
 import { logNotification } from "./notification-logger.js";
+import {
+  createOrResumeSession,
+  sendToSession as pushToSession,
+  abortSession as smAbortSession,
+  closeSession as smCloseSession,
+  closeSessionsForConnection,
+  hasActiveSession,
+  setSessionModel,
+  setSessionPermissionMode,
+} from "./session-manager.js";
 
 // Map short model names to current model IDs
 export const MODEL_MAP = {
@@ -341,12 +351,15 @@ export function buildPrompt(text, imgs) {
 }
 
 // ── Extracted handler: close ──────────────────────────────────────────────
-export function handleClose({ activeQueries, pendingApprovals }) {
-  // Abort all active SDK streams first (they may be blocked on approval)
+export function handleClose({ activeQueries, pendingApprovals, persistentSessionKeys }) {
   for (const [, q] of activeQueries) {
     q.abort();
   }
   activeQueries.clear();
+
+  if (persistentSessionKeys?.length) {
+    closeSessionsForConnection(persistentSessionKeys);
+  }
 
   for (const [id, { resolve, timer }] of pendingApprovals) {
     clearTimeout(timer);
@@ -356,15 +369,26 @@ export function handleClose({ activeQueries, pendingApprovals }) {
 }
 
 // ── Extracted handler: abort ──────────────────────────────────────────────
-export function handleAbort(msg, { activeQueries, pendingApprovals }) {
+export function handleAbort(msg, { activeQueries, pendingApprovals, persistentSessionKeys }) {
   if (msg.chatId) {
-    const q = activeQueries.get(msg.chatId);
-    if (q) { q.abort(); activeQueries.delete(msg.chatId); }
+    // Try abort via session manager for persistent sessions
+    const key = persistentSessionKeys?.find(k => k.endsWith(`::${msg.chatId}`));
+    if (key) {
+      smAbortSession(key);
+    } else {
+      const q = activeQueries.get(msg.chatId);
+      if (q) { q.abort(); activeQueries.delete(msg.chatId); }
+    }
   } else {
+    // Abort persistent sessions
+    if (persistentSessionKeys?.length) {
+      for (const key of persistentSessionKeys) {
+        smAbortSession(key);
+      }
+    }
     for (const q of activeQueries.values()) q.abort();
     activeQueries.clear();
   }
-  // Also deny any pending approvals on abort
   for (const [id, { resolve, timer }] of pendingApprovals) {
     clearTimeout(timer);
     resolve({ behavior: "deny", message: "Aborted by user" });
@@ -661,7 +685,7 @@ export async function handleOrchestrate(msg, { ws, sessionIds, activeQueries, pe
 }
 
 // ── Extracted handler: chat ───────────────────────────────────────────────
-export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingApprovals }) {
+export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingApprovals, persistentSessionKeys }) {
   const { message, cwd, sessionId: clientSid, projectName, chatId, permissionMode: clientPermMode, model: chatModel, maxTurns: clientMaxTurns, images, systemPrompt, disabledTools, worktree } = msg;
 
   // Handle /remember command — save memory and respond without calling Claude
@@ -685,11 +709,8 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
   }
 
   const queryKey = chatId || "__default__";
-
   const sessionKey = chatId ? `${clientSid}::${chatId}` : clientSid;
-  // Resolve the Claude session ID to resume:
-  //  1. In-memory map (active sessions this server run, restored from DB on startup)
-  //  2. clientSid itself — SDK-listed sessions use the Claude session ID directly as their ID
+
   const resumeId = clientSid
     ? (sessionIds.get(sessionKey) ?? clientSid)
     : undefined;
@@ -698,7 +719,24 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
     touchSession(clientSid);
   }
 
-  const abortController = new AbortController();
+  // ── Persistent session: push message to existing session if available ──
+  if (hasActiveSession(sessionKey)) {
+    const sendResult = pushToSession(sessionKey, message, images);
+    if (sendResult.ok) {
+      // Record user message in DB
+      if (clientSid) {
+        const userMsgData = { text: message };
+        if (images?.length) {
+          userMsgData.images = images.map(i => ({ name: i.name, data: i.data, mimeType: i.mimeType }));
+        }
+        addMessage(clientSid, "user", JSON.stringify(userMsgData), chatId || null);
+      }
+      return;
+    }
+    // Session existed but send failed (e.g. cwd changed) — fall through to create new
+  }
+
+  // ── No active session: create a new persistent session ──
   const effectivePermMode = clientPermMode || "bypass";
   const useBypass = effectivePermMode === "bypass";
   const usePlan = effectivePermMode === "plan";
@@ -722,7 +760,6 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
       worktreeRecord = { id: wtId, worktreePath: wtResult.worktreePath, branchName, baseBranch };
       effectiveCwd = wtResult.worktreePath;
 
-      // Notify client of worktree creation
       if (ws.readyState === 1) {
         const wtPayload = { type: "worktree_created", worktreeId: wtId, branchName, baseBranch, worktreePath: wtResult.worktreePath };
         if (chatId) wtPayload.chatId = chatId;
@@ -730,13 +767,11 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
       }
     } catch (err) {
       console.error("Worktree creation failed:", err.message, err.stack);
-      // Notify client of failure so they know it fell back to normal mode
       if (ws.readyState === 1) {
         const errPayload = { type: "worktree_error", error: err.message };
         if (chatId) errPayload.chatId = chatId;
         ws.send(JSON.stringify(errPayload));
       }
-      // Fall back to normal cwd — don't block the query
     }
   }
 
@@ -745,9 +780,8 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
   const opts = {
     cwd: effectiveCwd,
     permissionMode: usePlan ? "plan" : (useBypass ? "bypassPermissions" : "default"),
-    abortController,
-    stderr: (text) => stderrChunks.push(text),
     settingSources: ["user", "project", "local"],
+    stderr: (text) => stderrChunks.push(text),
   };
   if (opts.permissionMode === "bypassPermissions") {
     opts.allowDangerouslySkipPermissions = true;
@@ -761,26 +795,22 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
   if (Array.isArray(disabledTools) && disabledTools.length > 0) {
     opts.disallowedTools = disabledTools;
   }
-  // Prevent SDK from creating nested worktrees when Claudeck manages them
   if (worktreeRecord) {
     opts.disallowedTools = [...(opts.disallowedTools || []), "EnterWorktree"];
   }
 
-  // Build the system prompt append string from project prompt, per-message prompt, and memories
+  // Build the system prompt append string
   const appendParts = [];
   const projectPrompt = getProjectSystemPrompt(cwd);
   if (projectPrompt) appendParts.push(projectPrompt);
   if (systemPrompt) appendParts.push(systemPrompt);
 
-  // Run memory maintenance (decay stale, clean expired) on each session
   if (cwd) runMaintenance(cwd);
-  // Inject persistent memories for this project (smart: uses user message for relevance)
   if (cwd) {
     const { prompt: memPrompt, count: memCount, memories: memList } = buildMemoryPrompt(cwd, 10, message);
     if (memPrompt) {
       appendParts.push(memPrompt);
 
-      // Log memories being passed to Claude SDK
       console.log(`\n══════ MEMORY INJECTION ══════`);
       console.log(`Project: ${cwd}`);
       console.log(`User message: "${(message || '').slice(0, 100)}"`);
@@ -791,7 +821,6 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
       console.log(`Prompt appended to systemPrompt (${memPrompt.length} chars)`);
       console.log(`══════════════════════════════\n`);
 
-      // Notify client that memories were injected (include content for display)
       if (ws.readyState === 1) {
         const payload = { type: "memories_injected", count: memCount, memories: memList };
         if (chatId) payload.chatId = chatId;
@@ -810,271 +839,285 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
   }
   if (resumeId) opts.resume = resumeId;
 
-  const state = { resolvedSid: clientSid, lastAssistantText: "", lastChatMetrics: {} };
+  // ── Per-turn state for notifications/metrics ──
+  const turnState = {
+    resolvedSid: clientSid,
+    lastAssistantText: "",
+    lastChatMetrics: {},
+    currentMessage: message,
+    turnComplete: false,
+    turnAborted: false,
+    worktreeRecord,
+    hasInit: false,
+    cwd: cwd || null,
+    sessionModel: null,
+  };
 
   function wsSend(payload) {
     if (ws.readyState !== 1) return;
     if (chatId) payload.chatId = chatId;
-    if (state.resolvedSid) payload.sessionId = state.resolvedSid;
+    if (turnState.resolvedSid) payload.sessionId = turnState.resolvedSid;
     ws.send(JSON.stringify(payload));
   }
 
-  // Register for global tracking if we already know the session
+  // ── Track persistent session keys per connection ──
+  if (!persistentSessionKeys.includes(sessionKey)) {
+    persistentSessionKeys.push(sessionKey);
+  }
+
+  // Register for global tracking
   if (clientSid) registerGlobalQuery(clientSid, queryKey);
 
-  async function runChatQuery(queryOpts) {
-    const q = query({ prompt: buildPrompt(message, images), options: queryOpts });
-    activeQueries.set(queryKey, { abort: () => abortController.abort() });
+  // ── Output consumption callback — called by session-manager for each SDK message ──
+  function onMessage(sKey, sdkMsg) {
+    if (ws.readyState !== 1) return;
 
-    let claudeSessionId = null;
-    let sessionModel = null;
+    if (sdkMsg.type === "system" && sdkMsg.subtype === "init") {
+      const claudeSessionId = sdkMsg.session_id;
+      if (sdkMsg.model) turnState.sessionModel = sdkMsg.model;
+      const ourSid = clientSid || claudeSessionId;
+      turnState.resolvedSid = ourSid;
 
-    for await (const sdkMsg of q) {
-      if (ws.readyState !== 1) break;
+      const sKeyInner = chatId ? `${ourSid}::${chatId}` : ourSid;
+      sessionIds.set(sKeyInner, claudeSessionId);
 
-      if (sdkMsg.type === "system" && sdkMsg.subtype === "init") {
-        claudeSessionId = sdkMsg.session_id;
-        if (sdkMsg.model) sessionModel = sdkMsg.model;
-        const ourSid = clientSid || claudeSessionId;
-        state.resolvedSid = ourSid;
-
-        const sKey = chatId ? `${ourSid}::${chatId}` : ourSid;
-        sessionIds.set(sKey, claudeSessionId);
-
-        if (!getSession(ourSid)) {
-          createSession(ourSid, claudeSessionId, projectName || "Session", cwd || "");
-        } else {
-          updateClaudeSessionId(ourSid, claudeSessionId);
-        }
-
-        if (chatId) {
-          setClaudeSession(ourSid, chatId, claudeSessionId);
-        }
-
-        wsSend({ type: "session", sessionId: ourSid });
-        const userMsgData = { text: message };
-        if (images?.length) {
-          userMsgData.images = images.map(i => ({ name: i.name, data: i.data, mimeType: i.mimeType }));
-        }
-        addMessage(state.resolvedSid, "user", JSON.stringify(userMsgData), chatId || null);
-
-        // Register global query tracking now that we know the session
-        if (!clientSid) registerGlobalQuery(state.resolvedSid, queryKey);
-
-        const existingSession = getSession(ourSid);
-        if (existingSession && !existingSession.title) {
-          const title = message.slice(0, 100).split("\n")[0];
-          updateSessionTitle(ourSid, title);
-        }
-        continue;
+      if (!getSession(ourSid)) {
+        createSession(ourSid, claudeSessionId, projectName || "Session", cwd || "");
+      } else {
+        updateClaudeSessionId(ourSid, claudeSessionId);
       }
 
-      // Status updates (e.g. compacting)
-      if (sdkMsg.type === "system" && sdkMsg.subtype === "status") {
-        wsSend({ type: "status", status: sdkMsg.status });
-        continue;
+      if (chatId) {
+        setClaudeSession(ourSid, chatId, claudeSessionId);
       }
 
-      // Local command output (e.g. /compact summary)
-      if (sdkMsg.type === "system" && sdkMsg.subtype === "local_command_output") {
-        wsSend({ type: "text", text: sdkMsg.content });
-        if (state.resolvedSid) addMessage(state.resolvedSid, "assistant", JSON.stringify({ text: sdkMsg.content }), chatId || null);
-        continue;
+      wsSend({ type: "session", sessionId: ourSid });
+      turnState.hasInit = true;
+
+      if (!clientSid) registerGlobalQuery(ourSid, queryKey);
+
+      const existingSession = getSession(ourSid);
+      if (existingSession && !existingSession.title) {
+        const title = (turnState.currentMessage || "").slice(0, 100).split("\n")[0];
+        updateSessionTitle(ourSid, title);
+      }
+      return;
+    }
+
+    if (sdkMsg.type === "system" && sdkMsg.subtype === "status") {
+      wsSend({ type: "status", status: sdkMsg.status });
+      return;
+    }
+
+    if (sdkMsg.type === "system" && sdkMsg.subtype === "local_command_output") {
+      wsSend({ type: "text", text: sdkMsg.content });
+      if (turnState.resolvedSid) addMessage(turnState.resolvedSid, "assistant", JSON.stringify({ text: sdkMsg.content }), chatId || null);
+      return;
+    }
+
+    if (sdkMsg.type === "system" && sdkMsg.subtype === "compact_boundary") {
+      wsSend({ type: "compact_boundary", metadata: sdkMsg.compact_metadata });
+      return;
+    }
+
+    if (sdkMsg.type === "assistant" && sdkMsg.message?.content) {
+      for (const block of sdkMsg.message.content) {
+        if (block.type === "text" && block.text) {
+          turnState.lastAssistantText += (turnState.lastAssistantText ? "\n\n" : "") + block.text;
+          wsSend({ type: "text", text: block.text });
+          if (turnState.resolvedSid) addMessage(turnState.resolvedSid, "assistant", JSON.stringify({ text: block.text }), chatId || null);
+        } else if (block.type === "tool_use") {
+          wsSend({ type: "tool", id: block.id, name: block.name, input: block.input });
+          if (turnState.resolvedSid) addMessage(turnState.resolvedSid, "tool", JSON.stringify({ id: block.id, name: block.name, input: block.input }), chatId || null);
+        }
+      }
+      return;
+    }
+
+    if (sdkMsg.type === "result") {
+      if (sdkMsg.subtype === "success") {
+        const sid = turnState.resolvedSid;
+        const inputTokens = sdkMsg.usage?.input_tokens || 0;
+        const outputTokens = sdkMsg.usage?.output_tokens || 0;
+        const cacheReadTokens = sdkMsg.usage?.cache_read_input_tokens || 0;
+        const cacheCreationTokens = sdkMsg.usage?.cache_creation_input_tokens || 0;
+        const model = Object.keys(sdkMsg.modelUsage || {})[0] || turnState.sessionModel;
+        if (sid) addCost(sid, sdkMsg.total_cost_usd || 0, sdkMsg.duration_ms || 0, sdkMsg.num_turns || 0, inputTokens, outputTokens, { model, stopReason: "success", isError: 0, cacheReadTokens, cacheCreationTokens });
+        wsSend({ type: "result", duration_ms: sdkMsg.duration_ms, num_turns: sdkMsg.num_turns, cost_usd: sdkMsg.total_cost_usd, totalCost: getTotalCost(), input_tokens: inputTokens, output_tokens: outputTokens, cache_read_tokens: cacheReadTokens, cache_creation_tokens: cacheCreationTokens, model, stop_reason: "success" });
+        turnState.lastChatMetrics = { durationMs: sdkMsg.duration_ms, costUsd: sdkMsg.total_cost_usd, inputTokens, outputTokens, model, turns: sdkMsg.num_turns, isError: false };
+        if (sid) addMessage(sid, "result", JSON.stringify({ duration_ms: sdkMsg.duration_ms, num_turns: sdkMsg.num_turns, cost_usd: sdkMsg.total_cost_usd, input_tokens: inputTokens, output_tokens: outputTokens, cache_read_tokens: cacheReadTokens, cache_creation_tokens: cacheCreationTokens, model, stop_reason: "success" }), chatId || null);
+      } else if (sdkMsg.subtype === "error_max_turns") {
+        const sid = turnState.resolvedSid;
+        const inputTokens = sdkMsg.usage?.input_tokens || 0;
+        const outputTokens = sdkMsg.usage?.output_tokens || 0;
+        const cacheReadTokens = sdkMsg.usage?.cache_read_input_tokens || 0;
+        const cacheCreationTokens = sdkMsg.usage?.cache_creation_input_tokens || 0;
+        const model = Object.keys(sdkMsg.modelUsage || {})[0] || turnState.sessionModel;
+        if (sid) addCost(sid, sdkMsg.total_cost_usd || 0, sdkMsg.duration_ms || 0, sdkMsg.num_turns || 0, inputTokens, outputTokens, { model, stopReason: "error_max_turns", isError: 0, cacheReadTokens, cacheCreationTokens });
+        wsSend({ type: "result", duration_ms: sdkMsg.duration_ms, num_turns: sdkMsg.num_turns, cost_usd: sdkMsg.total_cost_usd, totalCost: getTotalCost(), input_tokens: inputTokens, output_tokens: outputTokens, cache_read_tokens: cacheReadTokens, cache_creation_tokens: cacheCreationTokens, model, stop_reason: "error_max_turns" });
+        wsSend({ type: "error", error: `Reached max turns limit (${sdkMsg.num_turns}). Send another message to continue.` });
+      } else if (sdkMsg.subtype?.startsWith("error")) {
+        const errMsg = sdkMsg.errors?.join(", ") || sdkMsg.error || sdkMsg.message || "Unknown error";
+        console.error("SDK result error:", JSON.stringify(sdkMsg));
+        const costUsd = sdkMsg.total_cost_usd || 0;
+        const durationMs = sdkMsg.duration_ms || 0;
+        const numTurns = sdkMsg.num_turns || 0;
+        const inputTokens = sdkMsg.usage?.input_tokens || 0;
+        const outputTokens = sdkMsg.usage?.output_tokens || 0;
+        const cacheReadTokens = sdkMsg.usage?.cache_read_input_tokens || 0;
+        const cacheCreationTokens = sdkMsg.usage?.cache_creation_input_tokens || 0;
+        const model = Object.keys(sdkMsg.modelUsage || {})[0] || turnState.sessionModel;
+        const sid = turnState.resolvedSid;
+        turnState.lastChatMetrics = { durationMs, costUsd, inputTokens, outputTokens, model, turns: numTurns, isError: true, error: errMsg };
+        if (sid) {
+          addCost(sid, costUsd, durationMs, numTurns, inputTokens, outputTokens, { model, stopReason: sdkMsg.subtype, isError: 1, cacheReadTokens, cacheCreationTokens });
+          addMessage(sid, "error", JSON.stringify({ error: errMsg, subtype: sdkMsg.subtype, duration_ms: durationMs, cost_usd: costUsd, model }), chatId || null);
+        }
+        wsSend({ type: "error", error: errMsg });
       }
 
-      // Compact boundary marker
-      if (sdkMsg.type === "system" && sdkMsg.subtype === "compact_boundary") {
-        wsSend({ type: "compact_boundary", metadata: sdkMsg.compact_metadata });
-        continue;
-      }
+      // Turn is complete — send done, fire notifications, capture memories
+      turnState.turnComplete = true;
+      wsSend({ type: "done" });
 
-      if (sdkMsg.type === "assistant" && sdkMsg.message?.content) {
-        for (const block of sdkMsg.message.content) {
-          if (block.type === "text" && block.text) {
-            state.lastAssistantText += (state.lastAssistantText ? "\n\n" : "") + block.text;
-            wsSend({ type: "text", text: block.text });
-            if (state.resolvedSid) addMessage(state.resolvedSid, "assistant", JSON.stringify({ text: block.text }), chatId || null);
-          } else if (block.type === "tool_use") {
-            wsSend({ type: "tool", id: block.id, name: block.name, input: block.input });
-            if (state.resolvedSid) addMessage(state.resolvedSid, "tool", JSON.stringify({ id: block.id, name: block.name, input: block.input }), chatId || null);
+      fireTurnNotifications(turnState, chatId, ws);
+
+      return;
+    }
+
+    if (sdkMsg.type === "user" && sdkMsg.message?.content) {
+      const blocks = Array.isArray(sdkMsg.message.content) ? sdkMsg.message.content : [];
+      for (const block of blocks) {
+        if (block.type === "tool_result") {
+          const text = Array.isArray(block.content) ? block.content.map(c => c.type === "text" ? c.text : "").join("") : typeof block.content === "string" ? block.content : "";
+          const wirePayload = { toolUseId: block.tool_use_id, content: text.slice(0, 2000), isError: block.is_error || false };
+          wsSend({ type: "tool_result", ...wirePayload });
+          if (turnState.resolvedSid) {
+            const dbPayload = { toolUseId: block.tool_use_id, content: text.slice(0, 10000), isError: block.is_error || false };
+            addMessage(turnState.resolvedSid, "tool_result", JSON.stringify(dbPayload), chatId || null);
           }
         }
-        continue;
       }
+      return;
+    }
 
-      if (sdkMsg.type === "result") {
-        if (sdkMsg.subtype === "success") {
-          const sid = state.resolvedSid || [...sessionIds.entries()].find(([, v]) => v === claudeSessionId)?.[0];
-          const inputTokens = sdkMsg.usage?.input_tokens || 0;
-          const outputTokens = sdkMsg.usage?.output_tokens || 0;
-          const cacheReadTokens = sdkMsg.usage?.cache_read_input_tokens || 0;
-          const cacheCreationTokens = sdkMsg.usage?.cache_creation_input_tokens || 0;
-          const model = Object.keys(sdkMsg.modelUsage || {})[0] || sessionModel;
-          if (sid) addCost(sid, sdkMsg.total_cost_usd || 0, sdkMsg.duration_ms || 0, sdkMsg.num_turns || 0, inputTokens, outputTokens, { model, stopReason: "success", isError: 0, cacheReadTokens, cacheCreationTokens });
-          wsSend({ type: "result", duration_ms: sdkMsg.duration_ms, num_turns: sdkMsg.num_turns, cost_usd: sdkMsg.total_cost_usd, totalCost: getTotalCost(), input_tokens: inputTokens, output_tokens: outputTokens, cache_read_tokens: cacheReadTokens, cache_creation_tokens: cacheCreationTokens, model, stop_reason: "success" });
-          state.lastChatMetrics = { durationMs: sdkMsg.duration_ms, costUsd: sdkMsg.total_cost_usd, inputTokens, outputTokens, model, turns: sdkMsg.num_turns, isError: false };
-          if (state.resolvedSid) addMessage(state.resolvedSid, "result", JSON.stringify({ duration_ms: sdkMsg.duration_ms, num_turns: sdkMsg.num_turns, cost_usd: sdkMsg.total_cost_usd, input_tokens: inputTokens, output_tokens: outputTokens, cache_read_tokens: cacheReadTokens, cache_creation_tokens: cacheCreationTokens, model, stop_reason: "success" }), chatId || null);
-        } else if (sdkMsg.subtype === "error_max_turns") {
-          // Max turns reached — treat as a normal completion with a notice
-          const sid = state.resolvedSid || [...sessionIds.entries()].find(([, v]) => v === claudeSessionId)?.[0];
-          const inputTokens = sdkMsg.usage?.input_tokens || 0;
-          const outputTokens = sdkMsg.usage?.output_tokens || 0;
-          const cacheReadTokens = sdkMsg.usage?.cache_read_input_tokens || 0;
-          const cacheCreationTokens = sdkMsg.usage?.cache_creation_input_tokens || 0;
-          const model = Object.keys(sdkMsg.modelUsage || {})[0] || sessionModel;
-          if (sid) addCost(sid, sdkMsg.total_cost_usd || 0, sdkMsg.duration_ms || 0, sdkMsg.num_turns || 0, inputTokens, outputTokens, { model, stopReason: "error_max_turns", isError: 0, cacheReadTokens, cacheCreationTokens });
-          wsSend({ type: "result", duration_ms: sdkMsg.duration_ms, num_turns: sdkMsg.num_turns, cost_usd: sdkMsg.total_cost_usd, totalCost: getTotalCost(), input_tokens: inputTokens, output_tokens: outputTokens, cache_read_tokens: cacheReadTokens, cache_creation_tokens: cacheCreationTokens, model, stop_reason: "error_max_turns" });
-          wsSend({ type: "error", error: `Reached max turns limit (${sdkMsg.num_turns}). Send another message to continue.` });
-        } else if (sdkMsg.subtype?.startsWith("error")) {
-          const errMsg = sdkMsg.errors?.join(", ") || sdkMsg.error || sdkMsg.message || "Unknown error";
-          console.error("SDK result error:", JSON.stringify(sdkMsg));
-          const costUsd = sdkMsg.total_cost_usd || 0;
-          const durationMs = sdkMsg.duration_ms || 0;
-          const numTurns = sdkMsg.num_turns || 0;
-          const inputTokens = sdkMsg.usage?.input_tokens || 0;
-          const outputTokens = sdkMsg.usage?.output_tokens || 0;
-          const cacheReadTokens = sdkMsg.usage?.cache_read_input_tokens || 0;
-          const cacheCreationTokens = sdkMsg.usage?.cache_creation_input_tokens || 0;
-          const model = Object.keys(sdkMsg.modelUsage || {})[0] || sessionModel;
-          const sid = state.resolvedSid || [...sessionIds.entries()].find(([, v]) => v === claudeSessionId)?.[0];
-          state.lastChatMetrics = { durationMs, costUsd, inputTokens, outputTokens, model, turns: numTurns, isError: true, error: errMsg };
-          if (sid) {
-            addCost(sid, costUsd, durationMs, numTurns, inputTokens, outputTokens, { model, stopReason: sdkMsg.subtype, isError: 1, cacheReadTokens, cacheCreationTokens });
-            addMessage(sid, "error", JSON.stringify({ error: errMsg, subtype: sdkMsg.subtype, duration_ms: durationMs, cost_usd: costUsd, model }), chatId || null);
-          }
-          wsSend({ type: "error", error: errMsg });
-        }
-        continue;
+    if (sdkMsg.type === "abort") {
+      if (turnState.resolvedSid) {
+        addMessage(turnState.resolvedSid, "aborted", JSON.stringify({ aborted: true }), chatId || null);
       }
+      wsSend({ type: "aborted" });
+      turnState.turnComplete = true;
+      turnState.turnAborted = true;
+      wsSend({ type: "done" });
+      return;
+    }
 
-      if (sdkMsg.type === "user" && sdkMsg.message?.content) {
-        const blocks = Array.isArray(sdkMsg.message.content) ? sdkMsg.message.content : [];
-        for (const block of blocks) {
-          if (block.type === "tool_result") {
-            const text = Array.isArray(block.content) ? block.content.map(c => c.type === "text" ? c.text : "").join("") : typeof block.content === "string" ? block.content : "";
-            const wirePayload = { toolUseId: block.tool_use_id, content: text.slice(0, 2000), isError: block.is_error || false };
-            wsSend({ type: "tool_result", ...wirePayload });
-            if (state.resolvedSid) {
-              const dbPayload = { toolUseId: block.tool_use_id, content: text.slice(0, 10000), isError: block.is_error || false };
-              addMessage(state.resolvedSid, "tool_result", JSON.stringify(dbPayload), chatId || null);
-            }
-          }
-        }
-        continue;
+    if (sdkMsg.type === "error") {
+      const stderrOutput = stderrChunks.join("");
+      // Stale session retry — close current and let the next message create fresh
+      if (opts.resume && stderrOutput.includes("No conversation found")) {
+        console.warn("Stale session", opts.resume, "— closing persistent session, next message will create fresh");
+        delete opts.resume;
+        sessionIds.delete(sessionKey);
+        smCloseSession(sessionKey);
+        // Remove from persistent keys since session is dead
+        const idx = persistentSessionKeys.indexOf(sessionKey);
+        if (idx !== -1) persistentSessionKeys.splice(idx, 1);
+      } else {
+        console.error("Session error:", sdkMsg.error, stderrOutput ? "\nstderr: " + stderrOutput : "");
+        wsSend({ type: "error", error: sdkMsg.error });
       }
+      turnState.turnComplete = true;
+      turnState.turnAborted = true;
+      wsSend({ type: "done" });
+      return;
     }
   }
 
-  try {
-    await runChatQuery(opts);
-    wsSend({ type: "done" });
-  } catch (err) {
-    if (err.name === "AbortError") {
-      if (state.resolvedSid) addMessage(state.resolvedSid, "aborted", JSON.stringify({ timestamp: Date.now() }), chatId || null);
-      wsSend({ type: "aborted" });
-    } else {
-      const stderrOutput = stderrChunks.join("");
-      // Retry without resume if the Claude session no longer exists
-      if (opts.resume && stderrOutput.includes("No conversation found")) {
-        console.warn("Stale session", opts.resume, "— retrying without resume");
-        delete opts.resume;
-        sessionIds.delete(sessionKey);
-        stderrChunks.length = 0;
-        try {
-          await runChatQuery(opts);
-          wsSend({ type: "done" });
-        } catch (retryErr) {
-          if (retryErr.name === "AbortError") {
-            if (state.resolvedSid) addMessage(state.resolvedSid, "aborted", JSON.stringify({ timestamp: Date.now() }), chatId || null);
-            wsSend({ type: "aborted" });
-          } else {
-            console.error("Query retry error:", retryErr.message);
-            wsSend({ type: "error", error: retryErr.message });
-          }
+  // Create the persistent session
+  createOrResumeSession(sessionKey, opts, onMessage);
+
+  // Record user message in DB
+  if (clientSid) {
+    const userMsgData = { text: message };
+    if (images?.length) {
+      userMsgData.images = images.map(i => ({ name: i.name, data: i.data, mimeType: i.mimeType }));
+    }
+    addMessage(clientSid, "user", JSON.stringify(userMsgData), chatId || null);
+  }
+}
+
+// ── Per-turn notification/memory/summary handler ──────────────────────────
+function fireTurnNotifications(turnState, chatId, ws) {
+  const { resolvedSid, lastAssistantText, lastChatMetrics, currentMessage, worktreeRecord } = turnState;
+
+  const session = resolvedSid ? getSession(resolvedSid) : null;
+  const pushTitle = session?.title || "Session complete";
+  sendPushNotification("Claudeck", pushTitle, `chat-${resolvedSid}`);
+
+  const userQuery = (currentMessage || "").slice(0, 150).split("\n")[0];
+  const answerSnippet = lastAssistantText
+    ? lastAssistantText.slice(0, 300).replace(/\n{2,}/g, "\n")
+    : "";
+
+  if (lastChatMetrics.isError) {
+    const errorBody = [
+      userQuery ? `Q: ${userQuery}` : "",
+      `Error: ${lastChatMetrics.error || "Unknown error"}`,
+    ].filter(Boolean).join("\n");
+    sendTelegramNotification("error", "Session Failed", errorBody, {
+      durationMs: lastChatMetrics.durationMs,
+      costUsd: lastChatMetrics.costUsd,
+      inputTokens: lastChatMetrics.inputTokens,
+      outputTokens: lastChatMetrics.outputTokens,
+      model: lastChatMetrics.model,
+    });
+  } else {
+    const body = [
+      userQuery ? `Q: ${userQuery}` : pushTitle,
+      answerSnippet ? `\nA: ${answerSnippet}` : "",
+    ].filter(Boolean).join("\n");
+    sendTelegramNotification("session", "Session Complete", body, {
+      durationMs: lastChatMetrics.durationMs,
+      costUsd: lastChatMetrics.costUsd,
+      inputTokens: lastChatMetrics.inputTokens,
+      outputTokens: lastChatMetrics.outputTokens,
+      model: lastChatMetrics.model,
+      turns: lastChatMetrics.turns,
+    });
+  }
+
+  if (resolvedSid) {
+    generateSessionSummary(resolvedSid).catch(err =>
+      console.error("Summary generation error:", err.message)
+    );
+  }
+
+  // Auto-capture memories from assistant output
+  const cwd = turnState.cwd;
+  if (cwd && lastAssistantText) {
+    try {
+      const explicitCount = saveExplicitMemories(cwd, lastAssistantText, resolvedSid);
+      const autoCount = captureMemories(cwd, lastAssistantText, resolvedSid, null);
+      const totalCaptured = explicitCount + autoCount;
+      if (totalCaptured > 0) {
+        console.log(`Captured ${totalCaptured} memories (${explicitCount} explicit, ${autoCount} auto) from session ${resolvedSid}`);
+        if (ws.readyState === 1) {
+          const payload = { type: "memories_captured", count: totalCaptured, explicit: explicitCount, auto: autoCount };
+          if (chatId) payload.chatId = chatId;
+          ws.send(JSON.stringify(payload));
         }
-      } else {
-        console.error("Query error:", err.message, stderrOutput ? "\nstderr: " + stderrOutput : "");
-        wsSend({ type: "error", error: err.message });
       }
-    }
-  } finally {
-    activeQueries.delete(queryKey);
-    unregisterGlobalQuery(state.resolvedSid, queryKey);
-    // Send push notification when query completes
-    const session = state.resolvedSid ? getSession(state.resolvedSid) : null;
-    const pushTitle = session?.title || "Session complete";
-    sendPushNotification("Claudeck", pushTitle, `chat-${state.resolvedSid}`);
+    } catch (e) { console.error("Memory capture error:", e.message); }
+  }
 
-    // Rich Telegram notification — meaningful for AFK developer
-    const userQuery = (message || "").slice(0, 150).split("\n")[0];
-    const answerSnippet = state.lastAssistantText
-      ? state.lastAssistantText.slice(0, 300).replace(/\n{2,}/g, "\n")
-      : "";
-
-    if (state.lastChatMetrics.isError) {
-      const errorBody = [
-        userQuery ? `Q: ${userQuery}` : "",
-        `Error: ${state.lastChatMetrics.error || "Unknown error"}`,
-      ].filter(Boolean).join("\n");
-      sendTelegramNotification("error", "Session Failed", errorBody, {
-        durationMs: state.lastChatMetrics.durationMs,
-        costUsd: state.lastChatMetrics.costUsd,
-        inputTokens: state.lastChatMetrics.inputTokens,
-        outputTokens: state.lastChatMetrics.outputTokens,
-        model: state.lastChatMetrics.model,
-      });
-    } else {
-      const body = [
-        userQuery ? `Q: ${userQuery}` : pushTitle,
-        answerSnippet ? `\nA: ${answerSnippet}` : "",
-      ].filter(Boolean).join("\n");
-      sendTelegramNotification("session", "Session Complete", body, {
-        durationMs: state.lastChatMetrics.durationMs,
-        costUsd: state.lastChatMetrics.costUsd,
-        inputTokens: state.lastChatMetrics.inputTokens,
-        outputTokens: state.lastChatMetrics.outputTokens,
-        model: state.lastChatMetrics.model,
-        turns: state.lastChatMetrics.turns,
-      });
-    }
-
-    // Fire-and-forget summary generation
-    if (state.resolvedSid) {
-      generateSessionSummary(state.resolvedSid).catch(err =>
-        console.error("Summary generation error:", err.message)
-      );
-    }
-
-    // Auto-capture memories from assistant output
-    if (cwd && state.lastAssistantText) {
+  // Worktree post-completion
+  if (worktreeRecord) {
+    (async () => {
       try {
-        // 1. Parse explicit ```memory blocks (Claude-requested saves)
-        const explicitCount = saveExplicitMemories(cwd, state.lastAssistantText, state.resolvedSid);
-
-        // 2. Heuristic extraction from assistant text
-        const autoCount = captureMemories(cwd, state.lastAssistantText, state.resolvedSid, null);
-
-        const totalCaptured = explicitCount + autoCount;
-        if (totalCaptured > 0) {
-          console.log(`Captured ${totalCaptured} memories (${explicitCount} explicit, ${autoCount} auto) from session ${state.resolvedSid}`);
-          // Notify client
-          if (ws.readyState === 1) {
-            const payload = { type: "memories_captured", count: totalCaptured, explicit: explicitCount, auto: autoCount };
-            if (chatId) payload.chatId = chatId;
-            ws.send(JSON.stringify(payload));
-          }
-        }
-      } catch (e) { console.error("Memory capture error:", e.message); }
-    }
-
-    // Worktree post-completion: auto-commit, diff stats, notify
-    if (worktreeRecord) {
-      try {
-        if (state.resolvedSid) updateWorktreeSession(worktreeRecord.id, state.resolvedSid);
-
-        const commitMsg = `claudeck: ${(message || "worktree changes").slice(0, 72)}`;
+        if (resolvedSid) updateWorktreeSession(worktreeRecord.id, resolvedSid);
+        const commitMsg = `claudeck: ${(currentMessage || "worktree changes").slice(0, 72)}`;
         await autoCommitWorktree(worktreeRecord.worktreePath, commitMsg);
-
         const stats = await getWorktreeDiffStats(worktreeRecord.worktreePath, worktreeRecord.baseBranch);
         updateWorktreeStatus(worktreeRecord.id, "completed");
 
@@ -1094,20 +1137,26 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
           `Worktree "${worktreeRecord.branchName}" ready`,
           `+${stats.insertions} -${stats.deletions} lines in ${stats.files} file(s)`,
           JSON.stringify({ worktreeId: worktreeRecord.id, branchName: worktreeRecord.branchName }),
-          state.resolvedSid,
+          resolvedSid,
           null
         );
       } catch (e) {
         console.error("Worktree post-completion error:", e.message);
       }
-    }
+    })();
   }
+
+  // Reset per-turn state for next turn
+  turnState.lastAssistantText = "";
+  turnState.lastChatMetrics = {};
+  turnState.turnComplete = false;
+  turnState.turnAborted = false;
 }
 
 // ── Main entry point: thin router ─────────────────────────────────────────
 export function setupWebSocket(wss, sessionIds) {
   wss.on("connection", (ws) => {
-    const ctx = { ws, sessionIds, activeQueries: new Map(), pendingApprovals: new Map() };
+    const ctx = { ws, sessionIds, activeQueries: new Map(), pendingApprovals: new Map(), persistentSessionKeys: [] };
 
     ws.on("close", () => handleClose(ctx));
 

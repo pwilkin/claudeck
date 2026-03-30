@@ -50,6 +50,43 @@ export function getInputHistory() {
   return inputHistory;
 }
 
+// ── Per-pane send queue ──
+const sendQueues = new Map();
+
+function enqueueMessage(pane, payload) {
+  if (!sendQueues.has(pane)) sendQueues.set(pane, []);
+  sendQueues.get(pane).push(payload);
+}
+
+function dequeueNext(pane) {
+  const queue = sendQueues.get(pane);
+  if (!queue || queue.length === 0) return null;
+  return queue.shift();
+}
+
+function flushSendQueue(pane) {
+  const payload = dequeueNext(pane);
+  if (!payload) return;
+  pane.isStreaming = true;
+  const parallelMode = getState("parallelMode");
+  if (parallelMode) {
+    pane.sendBtn?.classList.add("hidden");
+    pane.stopBtn?.classList.remove("hidden");
+  } else {
+    $.sendBtn?.classList.add("hidden");
+    $.stopBtn?.classList.remove("hidden");
+  }
+  const ws = getState("ws");
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(payload));
+    showThinking("Connecting to Claude...", pane);
+  }
+}
+
+function clearSendQueue(pane) {
+  sendQueues.delete(pane);
+}
+
 // ── Worktree mode toggle ──
 let worktreeMode = false;
 if ($.worktreeBtn) {
@@ -185,16 +222,7 @@ export function sendMessage(pane) {
   }
 
   hideWaitingForInput(pane);
-  pane.isStreaming = true;
   const parallelMode = getState("parallelMode");
-
-  if (parallelMode) {
-    pane.sendBtn.classList.add("hidden");
-    pane.stopBtn.classList.remove("hidden");
-  } else {
-    $.sendBtn.classList.add("hidden");
-    $.stopBtn.classList.remove("hidden");
-  }
 
   const selectedOption = $.projectSelect.options[$.projectSelect.selectedIndex];
   const projectName = selectedOption?.textContent || "Session";
@@ -229,12 +257,27 @@ export function sendMessage(pane) {
     return;
   }
 
+  if (pane.isStreaming) {
+    enqueueMessage(pane, payload);
+    return;
+  }
+
+  pane.isStreaming = true;
+  if (parallelMode) {
+    pane.sendBtn.classList.add("hidden");
+    pane.stopBtn.classList.remove("hidden");
+  } else {
+    $.sendBtn.classList.add("hidden");
+    $.stopBtn.classList.remove("hidden");
+  }
+
   ws.send(JSON.stringify(payload));
   showThinking("Connecting to Claude...", pane);
 }
 
 export function stopGeneration(pane) {
   pane = pane || getPane(null);
+  clearSendQueue(pane);
   const ws = getState("ws");
   if (ws && ws.readyState === WebSocket.OPEN) {
     const payload = { type: "abort" };
@@ -270,6 +313,8 @@ export function finishStreamingHandler(pane) {
     $.sendBtn.disabled = false;
     $.messageInput.focus();
   }
+
+  flushSendQueue(pane);
 
   // Re-render messages from DB so fork buttons appear on the completed turn
   const sid = getState("sessionId");
