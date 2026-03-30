@@ -1,5 +1,4 @@
-import { query } from "@anthropic-ai/claude-code";
-import { execPath } from "process";
+import { query } from "@anthropic-ai/claude-agent-sdk";
 import { existsSync } from "fs";
 import { homedir } from "os";
 import {
@@ -158,7 +157,7 @@ export async function processSdkStream(q, { ws, wsSend, sessionIds, clientSid, c
     if (sdkMsg.type === "system" && sdkMsg.subtype === "init") {
       claudeSessionId = sdkMsg.session_id;
       if (sdkMsg.model) sessionModel = sdkMsg.model;
-      const ourSid = clientSid || crypto.randomUUID();
+      const ourSid = clientSid || claudeSessionId;
       resolvedSid = ourSid;
 
       const sKey = chatId ? `${ourSid}::${chatId}` : ourSid;
@@ -179,22 +178,30 @@ export async function processSdkStream(q, { ws, wsSend, sessionIds, clientSid, c
 
       wsSend({ type: "session", sessionId: ourSid });
 
-      const msgText = isWorkflow ? `[${stepLabel}]` : null;
-      // Save user message now that we have a resolved sid
-      if (!isWorkflow) {
-        // user message saved by caller for chat; for workflow, save with step label
-      }
       if (isWorkflow) {
-        addMessage(resolvedSid, "user", JSON.stringify({ text: msgText }), null, wfMeta);
+        addMessage(resolvedSid, "user", JSON.stringify({ text: `[${stepLabel}]` }), null, wfMeta);
       }
+      continue;
+    }
 
-      if (!isWorkflow) {
-        // Auto-set session title from first user message
-        const existingSession = getSession(ourSid);
-        if (existingSession && !existingSession.title) {
-          // Title is set by caller
-        }
+    // Status updates (e.g. compacting)
+    if (sdkMsg.type === "system" && sdkMsg.subtype === "status") {
+      wsSend({ type: "status", status: sdkMsg.status });
+      continue;
+    }
+
+    // Local command output (e.g. /compact summary)
+    if (sdkMsg.type === "system" && sdkMsg.subtype === "local_command_output") {
+      wsSend({ type: "text", text: sdkMsg.content });
+      if (resolvedSid) {
+        addMessage(resolvedSid, "assistant", JSON.stringify({ text: sdkMsg.content }), chatId || null, wfMeta);
       }
+      continue;
+    }
+
+    // Compact boundary marker
+    if (sdkMsg.type === "system" && sdkMsg.subtype === "compact_boundary") {
+      wsSend({ type: "compact_boundary", metadata: sdkMsg.compact_metadata });
       continue;
     }
 
@@ -420,9 +427,12 @@ export async function handleWorkflow(msg, { ws, sessionIds, activeQueries, pendi
       permissionMode: usePlan ? "plan" : (useBypass ? "bypassPermissions" : "default"),
       abortController,
       maxTurns: 30,
-      executable: execPath,
       settingSources: ["user", "project", "local"],
     };
+
+    if (stepOpts.permissionMode === "bypassPermissions") {
+      stepOpts.allowDangerouslySkipPermissions = true;
+    }
 
     if (!useBypass && !usePlan) {
       stepOpts.canUseTool = makeCanUseTool(ws, pendingApprovals, effectivePermMode, null, `Workflow: ${workflow.title}`);
@@ -430,7 +440,9 @@ export async function handleWorkflow(msg, { ws, sessionIds, activeQueries, pendi
     if (wfModel) stepOpts.model = resolveModel(wfModel);
 
     const projectPrompt = getProjectSystemPrompt(cwd);
-    if (projectPrompt) stepOpts.appendSystemPrompt = projectPrompt;
+    if (projectPrompt) {
+      stepOpts.systemPrompt = { type: "preset", preset: "claude_code", append: projectPrompt };
+    }
     if (resumeId) stepOpts.resume = resumeId;
 
     try {
@@ -729,10 +741,12 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
     cwd: effectiveCwd,
     permissionMode: usePlan ? "plan" : (useBypass ? "bypassPermissions" : "default"),
     abortController,
-    executable: execPath,
     stderr: (text) => stderrChunks.push(text),
     settingSources: ["user", "project", "local"],
   };
+  if (opts.permissionMode === "bypassPermissions") {
+    opts.allowDangerouslySkipPermissions = true;
+  }
   if (effectiveMaxTurns) opts.maxTurns = effectiveMaxTurns;
 
   if (!useBypass && !usePlan) {
@@ -747,20 +761,19 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
     opts.disallowedTools = [...(opts.disallowedTools || []), "EnterWorktree"];
   }
 
+  // Build the system prompt append string from project prompt, per-message prompt, and memories
+  const appendParts = [];
   const projectPrompt = getProjectSystemPrompt(cwd);
-  if (projectPrompt) opts.appendSystemPrompt = projectPrompt;
-  if (systemPrompt) {
-    opts.appendSystemPrompt = (opts.appendSystemPrompt || '') +
-      (opts.appendSystemPrompt ? '\n\n' : '') + systemPrompt;
-  }
+  if (projectPrompt) appendParts.push(projectPrompt);
+  if (systemPrompt) appendParts.push(systemPrompt);
+
   // Run memory maintenance (decay stale, clean expired) on each session
   if (cwd) runMaintenance(cwd);
   // Inject persistent memories for this project (smart: uses user message for relevance)
   if (cwd) {
     const { prompt: memPrompt, count: memCount, memories: memList } = buildMemoryPrompt(cwd, 10, message);
     if (memPrompt) {
-      opts.appendSystemPrompt = (opts.appendSystemPrompt || '') +
-        (opts.appendSystemPrompt ? '\n\n' : '') + memPrompt;
+      appendParts.push(memPrompt);
 
       // Log memories being passed to Claude SDK
       console.log(`\n══════ MEMORY INJECTION ══════`);
@@ -770,7 +783,7 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
       for (const m of memList) {
         console.log(`  [${m.category}] ${m.content.slice(0, 120)}`);
       }
-      console.log(`Prompt appended to appendSystemPrompt (${memPrompt.length} chars)`);
+      console.log(`Prompt appended to systemPrompt (${memPrompt.length} chars)`);
       console.log(`══════════════════════════════\n`);
 
       // Notify client that memories were injected (include content for display)
@@ -785,6 +798,10 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
       console.log(`No memories found for this project`);
       console.log(`══════════════════════════════\n`);
     }
+  }
+
+  if (appendParts.length > 0) {
+    opts.systemPrompt = { type: "preset", preset: "claude_code", append: appendParts.join("\n\n") };
   }
   if (resumeId) opts.resume = resumeId;
 
@@ -813,7 +830,7 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
       if (sdkMsg.type === "system" && sdkMsg.subtype === "init") {
         claudeSessionId = sdkMsg.session_id;
         if (sdkMsg.model) sessionModel = sdkMsg.model;
-        const ourSid = clientSid || crypto.randomUUID();
+        const ourSid = clientSid || claudeSessionId;
         state.resolvedSid = ourSid;
 
         const sKey = chatId ? `${ourSid}::${chatId}` : ourSid;
@@ -844,6 +861,25 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
           const title = message.slice(0, 100).split("\n")[0];
           updateSessionTitle(ourSid, title);
         }
+        continue;
+      }
+
+      // Status updates (e.g. compacting)
+      if (sdkMsg.type === "system" && sdkMsg.subtype === "status") {
+        wsSend({ type: "status", status: sdkMsg.status });
+        continue;
+      }
+
+      // Local command output (e.g. /compact summary)
+      if (sdkMsg.type === "system" && sdkMsg.subtype === "local_command_output") {
+        wsSend({ type: "text", text: sdkMsg.content });
+        if (state.resolvedSid) addMessage(state.resolvedSid, "assistant", JSON.stringify({ text: sdkMsg.content }), chatId || null);
+        continue;
+      }
+
+      // Compact boundary marker
+      if (sdkMsg.type === "system" && sdkMsg.subtype === "compact_boundary") {
+        wsSend({ type: "compact_boundary", metadata: sdkMsg.compact_metadata });
         continue;
       }
 

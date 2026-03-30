@@ -5,8 +5,7 @@
  * 1. Heuristic pre-filter (instant, no cost) — remove obvious noise
  * 2. Model-based consolidation (Claude Haiku) — merge, rewrite, re-categorize
  */
-import { query } from "@anthropic-ai/claude-code";
-import { execPath } from "process";
+import { query } from "@anthropic-ai/claude-agent-sdk";
 import { listMemories, createMemory, deleteMemory, getDb } from "../db.js";
 
 const VALID_CATEGORIES = new Set(["convention", "decision", "discovery", "warning"]);
@@ -201,7 +200,7 @@ export async function optimizeMemories(projectPath, onProgress = () => {}) {
         model: "claude-haiku-4-5-20251001",
         maxTurns: 1,
         permissionMode: "bypassPermissions",
-        executable: execPath,
+        allowDangerouslySkipPermissions: true,
       },
     });
 

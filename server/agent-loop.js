@@ -1,5 +1,4 @@
-import { query } from "@anthropic-ai/claude-code";
-import { execPath } from "process";
+import { query } from "@anthropic-ai/claude-agent-sdk";
 import { existsSync } from "fs";
 import { homedir } from "os";
 
@@ -144,9 +143,12 @@ export async function runAgent({
     permissionMode: usePlan ? "plan" : (useBypass ? "bypassPermissions" : "default"),
     abortController,
     maxTurns,
-    executable: execPath,
     settingSources: ["user", "project", "local"],
   };
+
+  if (opts.permissionMode === "bypassPermissions") {
+    opts.allowDangerouslySkipPermissions = true;
+  }
 
   if (!useBypass && !usePlan) {
     opts.canUseTool = makeCanUseTool(ws, pendingApprovals, effectivePermMode, null, agentDef.title || "Agent");
@@ -154,7 +156,9 @@ export async function runAgent({
   if (model) opts.model = resolveModel(model);
 
   const projectPrompt = getProjectSystemPrompt(cwd);
-  if (projectPrompt) opts.appendSystemPrompt = projectPrompt;
+  if (projectPrompt) {
+    opts.systemPrompt = { type: "preset", preset: "claude_code", append: projectPrompt };
+  }
 
   // Resume existing session — explicit chainResumeId takes priority
   const resumeId = chainResumeId || (clientSid ? sessionIds.get(clientSid) : undefined);
@@ -180,7 +184,7 @@ export async function runAgent({
       if (sdkMsg.type === "system" && sdkMsg.subtype === "init") {
         claudeSessionId = sdkMsg.session_id;
         if (sdkMsg.model) sessionModel = sdkMsg.model;
-        const ourSid = clientSid || crypto.randomUUID();
+        const ourSid = clientSid || claudeSessionId;
         resolvedSid = ourSid;
 
         sessionIds.set(ourSid, claudeSessionId);

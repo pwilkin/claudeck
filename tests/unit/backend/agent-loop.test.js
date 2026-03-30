@@ -46,7 +46,7 @@ vi.mock("../../../server/notification-logger.js", () => ({
 }));
 
 // Default mock: yields init, assistant text, and a success result
-vi.mock("@anthropic-ai/claude-code", () => ({
+vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   query: vi.fn(({ prompt, options }) => {
     const messages = [
       { type: "system", subtype: "init", session_id: "test-claude-sid", model: "claude-sonnet-4-6" },
@@ -70,7 +70,7 @@ vi.mock("@anthropic-ai/claude-code", () => ({
 }));
 
 import { runAgent } from "../../../server/agent-loop.js";
-import { query } from "@anthropic-ai/claude-code";
+import { query } from "@anthropic-ai/claude-agent-sdk";
 import {
   recordAgentRunStart,
   recordAgentRunComplete,
@@ -882,7 +882,7 @@ describe("agent-loop — runAgent", () => {
       const opts = baseOpts();
       await runAgent(opts);
       const callArgs = query.mock.calls[0][0];
-      expect(callArgs.options.appendSystemPrompt).toBeUndefined();
+      expect(callArgs.options.systemPrompt).toBeUndefined();
     });
 
     it("sets appendSystemPrompt when project has system prompt", async () => {
@@ -891,7 +891,11 @@ describe("agent-loop — runAgent", () => {
       const opts = baseOpts();
       await runAgent(opts);
       const callArgs = query.mock.calls[0][0];
-      expect(callArgs.options.appendSystemPrompt).toBe("Always use TypeScript");
+      expect(callArgs.options.systemPrompt).toEqual({
+        type: "preset",
+        preset: "claude_code",
+        append: "Always use TypeScript",
+      });
     });
   });
 

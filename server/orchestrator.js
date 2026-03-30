@@ -8,8 +8,7 @@
  * 4. Feed results back to orchestrator for synthesis (via session resume)
  */
 
-import { query } from "@anthropic-ai/claude-code";
-import { execPath } from "process";
+import { query } from "@anthropic-ai/claude-agent-sdk";
 import { existsSync } from "fs";
 import { homedir } from "os";
 import {
@@ -157,9 +156,12 @@ export async function runOrchestrator({
         : "default",
     abortController,
     maxTurns: 3, // Planner should just think, not use many tools
-    executable: execPath,
     settingSources: ["user", "project", "local"],
   };
+
+  if (plannerOpts.permissionMode === "bypassPermissions") {
+    plannerOpts.allowDangerouslySkipPermissions = true;
+  }
 
   if (!useBypass && !usePlan) {
     plannerOpts.canUseTool = makeCanUseTool(
@@ -173,7 +175,9 @@ export async function runOrchestrator({
   if (model) plannerOpts.model = resolveModel(model);
 
   const projectPrompt = getProjectSystemPrompt(cwd);
-  if (projectPrompt) plannerOpts.appendSystemPrompt = projectPrompt;
+  if (projectPrompt) {
+    plannerOpts.systemPrompt = { type: "preset", preset: "claude_code", append: projectPrompt };
+  }
 
   const resumeId = clientSid ? sessionIds.get(clientSid) : undefined;
   if (resumeId) plannerOpts.resume = resumeId;
@@ -194,7 +198,7 @@ export async function runOrchestrator({
 
       if (sdkMsg.type === "system" && sdkMsg.subtype === "init") {
         claudeSessionId = sdkMsg.session_id;
-        const ourSid = clientSid || crypto.randomUUID();
+        const ourSid = clientSid || claudeSessionId;
         resolvedSid = ourSid;
         sessionIds.set(ourSid, claudeSessionId);
 

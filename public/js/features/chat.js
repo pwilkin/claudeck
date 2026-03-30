@@ -521,6 +521,16 @@ function handleServerMessage(msg) {
       // /remember command response — already handled by "text" message
       break;
 
+    case "status":
+      if (msg.status === "compacting") {
+        showThinking("Compacting conversation...", pane);
+      }
+      break;
+
+    case "compact_boundary":
+      resetContextGauge();
+      break;
+
     case "worktree_created":
       showWorktreeBanner(msg.branchName, msg.baseBranch, pane);
       showThinking(`Working in worktree: ${msg.branchName}...`, pane);
@@ -957,6 +967,44 @@ registerCommand("theme", {
   execute() {
     const current = document.documentElement.getAttribute("data-theme") || "dark";
     applyTheme(current === "dark" ? "light" : "dark");
+  },
+});
+
+registerCommand("compact", {
+  category: "cli",
+  description: "Summarize and compress conversation context",
+  needsArgs: true,
+  execute(args, pane) {
+    pane = pane || getPane(null);
+    const ws = getState("ws");
+    const sessionId = getState("sessionId");
+    const cwd = $.projectSelect?.value;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !sessionId || !cwd) {
+      addStatus("No active session to compact", true, pane);
+      return;
+    }
+    const selectedOption = $.projectSelect.options[$.projectSelect.selectedIndex];
+    const projectName = selectedOption?.textContent || "Session";
+    const payload = {
+      type: "chat",
+      message: "/compact" + (args ? " " + args : ""),
+      cwd,
+      sessionId,
+      projectName,
+      permissionMode: getPermissionMode(),
+    };
+    const chatId = pane.chatId;
+    if (getState("parallelMode") && chatId) payload.chatId = chatId;
+    ws.send(JSON.stringify(payload));
+    showThinking("Compacting conversation...", pane);
+    pane.isStreaming = true;
+    if (getState("parallelMode")) {
+      pane.sendBtn?.classList.add("hidden");
+      pane.stopBtn?.classList.remove("hidden");
+    } else {
+      $.sendBtn?.classList.add("hidden");
+      $.stopBtn?.classList.remove("hidden");
+    }
   },
 });
 

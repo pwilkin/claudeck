@@ -1,5 +1,4 @@
-import { query } from "@anthropic-ai/claude-code";
-import { execPath } from "process";
+import { query } from "@anthropic-ai/claude-agent-sdk";
 import { getMessagesNoChatId, updateSessionSummary, getSession } from "../db.js";
 
 export async function generateSessionSummary(sessionId) {
@@ -34,7 +33,7 @@ export async function generateSessionSummary(sessionId) {
       maxTurns: 1,
       model: "claude-haiku-4-5-20251001",
       permissionMode: "bypassPermissions",
-      executable: execPath,
+      allowDangerouslySkipPermissions: true,
     },
   });
 

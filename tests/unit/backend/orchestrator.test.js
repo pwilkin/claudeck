@@ -75,7 +75,7 @@ function makeSynthesisOutput(text) {
 
 let queryCallCount = 0;
 
-vi.mock("@anthropic-ai/claude-code", () => ({
+vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   query: vi.fn(() => {
     // First call = planner, second call = synthesis
     queryCallCount++;
@@ -90,7 +90,7 @@ vi.mock("@anthropic-ai/claude-code", () => ({
 
 import { runOrchestrator } from "../../../server/orchestrator.js";
 import { runAgent } from "../../../server/agent-loop.js";
-import { query } from "@anthropic-ai/claude-code";
+import { query } from "@anthropic-ai/claude-agent-sdk";
 import {
   createSession,
   getSession,
@@ -627,7 +627,11 @@ describe("orchestrator — runOrchestrator", () => {
     await runOrchestrator(opts);
 
     const plannerCall = query.mock.calls[0][0];
-    expect(plannerCall.options.appendSystemPrompt).toBe("Always use TypeScript");
+    expect(plannerCall.options.systemPrompt).toEqual({
+      type: "preset",
+      preset: "claude_code",
+      append: "Always use TypeScript",
+    });
   });
 
   // ── Branch: no project system prompt ──────────────────────────────────
@@ -641,7 +645,7 @@ describe("orchestrator — runOrchestrator", () => {
     await runOrchestrator(opts);
 
     const plannerCall = query.mock.calls[0][0];
-    expect(plannerCall.options.appendSystemPrompt).toBeUndefined();
+    expect(plannerCall.options.systemPrompt).toBeUndefined();
   });
 
   // ── Branch: session resume — clientSid exists with mapped sessionId ──

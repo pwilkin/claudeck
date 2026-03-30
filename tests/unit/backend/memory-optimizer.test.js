@@ -9,7 +9,7 @@ vi.mock("../../../db.js", () => ({
   getDb: vi.fn(() => ({ transaction: mockTransaction })),
 }));
 
-vi.mock("@anthropic-ai/claude-code", () => ({
+vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   query: vi.fn(() =>
     (async function* () {
       yield {
@@ -34,7 +34,7 @@ import {
   applyOptimization,
 } from "../../../server/memory-optimizer.js";
 import { listMemories, createMemory, deleteMemory, getDb } from "../../../db.js";
-import { query } from "@anthropic-ai/claude-code";
+import { query } from "@anthropic-ai/claude-agent-sdk";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
