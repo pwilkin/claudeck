@@ -8,6 +8,7 @@ const mockReadFile = vi.fn();
 const mockReaddir = vi.fn();
 const mockStat = vi.fn();
 const mockWriteFile = vi.fn();
+const mockSdkListSessions = vi.fn(async () => []);
 
 vi.mock("fs/promises", () => ({
   readFile: (...args) => mockReadFile(...args),
@@ -24,6 +25,11 @@ vi.mock("os", async (importOriginal) => {
   const original = await importOriginal();
   return { ...original, homedir: vi.fn(() => "/mock/home") };
 });
+
+vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
+  listSessions: (...args) => mockSdkListSessions(...args),
+  query: vi.fn(),
+}));
 
 const projectsModule = await import("../../../../server/routes/projects.js");
 const projectsRouter = projectsModule.default;
@@ -46,32 +52,74 @@ describe("projects routes", () => {
     vi.clearAllMocks();
     app = buildApp();
     mockWriteFile.mockResolvedValue(undefined);
+    mockSdkListSessions.mockResolvedValue([]);
+    // Default: no folders.json
+    mockReadFile.mockRejectedValue(new Error("Not found"));
   });
 
   // ── GET / (list projects) ───────────────────────────────────────────────
 
   describe("GET /projects", () => {
-    it("returns project list from config", async () => {
-      const projects = [
-        { name: "My App", path: "/home/user/my-app" },
-        { name: "Backend", path: "/home/user/backend" },
-      ];
-      mockReadFile.mockResolvedValue(JSON.stringify(projects));
+    it("discovers projects from SDK sessions", async () => {
+      mockSdkListSessions.mockResolvedValue([
+        { sessionId: "s1", cwd: "/home/user/my-app", lastModified: 2000 },
+        { sessionId: "s2", cwd: "/home/user/backend", lastModified: 1000 },
+        { sessionId: "s3", cwd: "/home/user/my-app", lastModified: 3000 },
+      ]);
 
       const res = await request(app).get("/projects");
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual(projects);
-      expect(mockReadFile).toHaveBeenCalledWith("/mock/config/folders.json", "utf-8");
+      // Sorted by most recent, unique cwds
+      expect(res.body).toEqual([
+        { name: "my-app", path: "/home/user/my-app" },
+        { name: "backend", path: "/home/user/backend" },
+      ]);
+      expect(mockSdkListSessions).toHaveBeenCalledWith({ limit: 500 });
     });
 
-    it("returns 500 when config file read fails", async () => {
-      mockReadFile.mockRejectedValue(new Error("Read failed"));
+    it("uses custom name from folders.json when available", async () => {
+      mockSdkListSessions.mockResolvedValue([
+        { sessionId: "s1", cwd: "/home/user/my-app", lastModified: 1000 },
+      ]);
+      mockReadFile.mockResolvedValue(
+        JSON.stringify([{ name: "My Custom App", path: "/home/user/my-app" }]),
+      );
+
+      const res = await request(app).get("/projects");
+
+      expect(res.status).toBe(200);
+      expect(res.body[0]).toMatchObject({ name: "My Custom App", path: "/home/user/my-app" });
+    });
+
+    it("includes custom projects not in SDK sessions", async () => {
+      mockSdkListSessions.mockResolvedValue([]);
+      mockReadFile.mockResolvedValue(
+        JSON.stringify([{ name: "Offline Project", path: "/home/user/offline" }]),
+      );
+
+      const res = await request(app).get("/projects");
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual([{ name: "Offline Project", path: "/home/user/offline" }]);
+    });
+
+    it("returns empty list when no sessions and no config", async () => {
+      mockSdkListSessions.mockResolvedValue([]);
+
+      const res = await request(app).get("/projects");
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual([]);
+    });
+
+    it("returns 500 when SDK throws", async () => {
+      mockSdkListSessions.mockRejectedValue(new Error("SDK error"));
 
       const res = await request(app).get("/projects");
 
       expect(res.status).toBe(500);
-      expect(res.body.error).toBe("Read failed");
+      expect(res.body.error).toBe("SDK error");
     });
   });
 

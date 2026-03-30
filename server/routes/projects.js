@@ -1,8 +1,9 @@
 import { Router } from "express";
 import { readFile, readdir, stat, writeFile } from "fs/promises";
-import { join, resolve, isAbsolute, dirname } from "path";
+import { join, resolve, isAbsolute, dirname, basename } from "path";
 import { homedir } from "os";
 import { configPath } from "../paths.js";
+import { listSessions as sdkListSessions } from "@anthropic-ai/claude-agent-sdk";
 
 const router = Router();
 
@@ -24,11 +25,48 @@ export function getProjectSystemPrompt(cwd) {
   return project?.systemPrompt || "";
 }
 
-// Serve configured project folders
+// Serve projects: discover from Claude's internal session storage, overlay with folders.json for custom names/prompts
 router.get("/", async (req, res) => {
   try {
-    const data = await readFile(configPath("folders.json"), "utf-8");
-    res.json(JSON.parse(data));
+    // Load custom config (names, system prompts)
+    let customConfigs = [];
+    try {
+      customConfigs = JSON.parse(await readFile(configPath("folders.json"), "utf-8"));
+    } catch { /* no folders.json yet */ }
+    const customByPath = new Map(customConfigs.map((p) => [p.path, p]));
+
+    // Collect unique project cwds from Claude's session storage
+    const sessions = await sdkListSessions({ limit: 500 });
+    const cwdLatest = new Map(); // cwd -> lastModified
+    for (const s of sessions) {
+      if (s.cwd) {
+        const prev = cwdLatest.get(s.cwd) || 0;
+        if (s.lastModified > prev) cwdLatest.set(s.cwd, s.lastModified);
+      }
+    }
+
+    // Build sorted project list
+    const discovered = Array.from(cwdLatest.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([p]) => p);
+
+    const projects = discovered.map((p) => {
+      const custom = customByPath.get(p);
+      return {
+        name: custom?.name || basename(p),
+        path: p,
+        ...(custom?.systemPrompt ? { systemPrompt: custom.systemPrompt } : {}),
+      };
+    });
+
+    // Append any custom-configured projects not yet in Claude's storage
+    for (const cfg of customConfigs) {
+      if (!cwdLatest.has(cfg.path)) {
+        projects.push({ name: cfg.name, path: cfg.path, ...(cfg.systemPrompt ? { systemPrompt: cfg.systemPrompt } : {}) });
+      }
+    }
+
+    res.json(projects);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

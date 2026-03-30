@@ -502,6 +502,20 @@ export function toggleSessionPin(id) {
   stmts.toggleSessionPin.run(id);
 }
 
+export function ensureSession(id) {
+  db.prepare(`INSERT OR IGNORE INTO sessions (id, claude_session_id) VALUES (?, ?)`).run(id, id);
+}
+
+export function getSessionMetaBatch(ids) {
+  if (!ids.length) return new Map();
+  const placeholders = ids.map(() => '?').join(',');
+  const rows = db.prepare(`
+    SELECT s.id, s.pinned, ${MODE_CASE}
+    FROM sessions s WHERE s.id IN (${placeholders})
+  `).all(...ids);
+  return new Map(rows.map(r => [r.id, { pinned: r.pinned || 0, mode: r.mode }]));
+}
+
 export function updateSessionSummary(id, summary) {
   stmts.updateSessionSummary.run(summary, id);
 }

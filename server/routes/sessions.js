@@ -1,12 +1,19 @@
 import { Router } from "express";
+import { basename } from "path";
+import { homedir } from "os";
+import { join } from "path";
+import { unlink } from "fs/promises";
 import {
-  listSessions,
+  listSessions as sdkListSessions,
+  getSessionInfo,
+  renameSession as sdkRenameSession,
+  forkSession as sdkForkSession,
+} from "@anthropic-ai/claude-agent-sdk";
+import {
   deleteSession as dbDeleteSession,
-  updateSessionTitle,
   toggleSessionPin,
-  searchSessions,
-  forkSession as dbForkSession,
-  getSession,
+  ensureSession,
+  getSessionMetaBatch,
   getSessionBranches,
   getSessionLineage,
 } from "../../db.js";
@@ -21,24 +28,50 @@ export function setSessionIds(map) {
   sessionIds = map;
 }
 
-// List sessions (optionally filtered by project_path)
-router.get("/", (req, res) => {
+function sdkSessionToRow(s, meta = {}) {
+  return {
+    id: s.sessionId,
+    title: s.customTitle || null,
+    summary: s.summary || null,
+    project_path: s.cwd || null,
+    project_name: s.cwd ? basename(s.cwd) : null,
+    last_used_at: s.lastModified ? Math.floor(s.lastModified / 1000) : null,
+    pinned: meta.pinned || 0,
+    mode: meta.mode || "single",
+    parent_session_id: null,
+  };
+}
+
+// List sessions (filtered by project_path)
+router.get("/", async (req, res) => {
   try {
     const projectPath = req.query.project_path || undefined;
-    const sessions = listSessions(20, projectPath);
-    res.json(sessions);
+    if (!projectPath) return res.json([]);
+    const sessions = await sdkListSessions({ dir: projectPath, limit: 50 });
+    const metaMap = getSessionMetaBatch(sessions.map((s) => s.sessionId));
+    res.json(sessions.map((s) => sdkSessionToRow(s, metaMap.get(s.sessionId))));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Search sessions
-router.get("/search", (req, res) => {
+// Search sessions (filter SDK results server-side)
+router.get("/search", async (req, res) => {
   try {
-    const q = req.query.q || "";
+    const q = (req.query.q || "").toLowerCase();
     const projectPath = req.query.project_path || undefined;
-    const sessions = searchSessions(q, 20, projectPath);
-    res.json(sessions);
+    if (!projectPath) return res.json([]);
+    const sessions = await sdkListSessions({ dir: projectPath, limit: 200 });
+    const filtered = q
+      ? sessions.filter(
+          (s) =>
+            (s.summary || "").toLowerCase().includes(q) ||
+            (s.customTitle || "").toLowerCase().includes(q) ||
+            (s.firstPrompt || "").toLowerCase().includes(q),
+        )
+      : sessions;
+    const metaMap = getSessionMetaBatch(filtered.map((s) => s.sessionId));
+    res.json(filtered.slice(0, 20).map((s) => sdkSessionToRow(s, metaMap.get(s.sessionId))));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -53,40 +86,51 @@ router.get("/active", (req, res) => {
   }
 });
 
-// Delete a session
-router.delete("/:id", (req, res) => {
+// Delete a session — removes from Claudeck DB and Claude's JSONL storage
+router.delete("/:id", async (req, res) => {
   try {
     const id = req.params.id;
+    // Delete from Claudeck DB
     dbDeleteSession(id);
-    // Clean up sessionIds map entries for this session
+    // Clean up sessionIds map
     for (const [key] of sessionIds) {
       if (key === id || key.startsWith(id + "::")) {
         sessionIds.delete(key);
       }
     }
+    // Delete JSONL file from Claude's storage (best effort)
+    try {
+      const info = await getSessionInfo(id);
+      if (info?.cwd) {
+        const projectDir = info.cwd.replace(/\//g, "-");
+        const jsonlPath = join(homedir(), ".claude", "projects", projectDir, `${id}.jsonl`);
+        await unlink(jsonlPath);
+      }
+    } catch { /* file may not exist */ }
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Update session title
-router.put("/:id/title", (req, res) => {
+// Update session title in Claude's storage
+router.put("/:id/title", async (req, res) => {
   try {
     const { title } = req.body;
     if (typeof title !== "string") {
       return res.status(400).json({ error: "title is required" });
     }
-    updateSessionTitle(req.params.id, title.slice(0, 200));
+    await sdkRenameSession(req.params.id, title.slice(0, 200));
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Toggle session pin
+// Toggle session pin (Claudeck-specific metadata)
 router.put("/:id/pin", (req, res) => {
   try {
+    ensureSession(req.params.id);
     toggleSessionPin(req.params.id);
     res.json({ ok: true });
   } catch (err) {
@@ -104,26 +148,18 @@ router.post("/:id/summary", async (req, res) => {
   }
 });
 
-// ── Session Branching / Forking ─────────────────────────
-
-// Fork a session at a given message
-router.post("/:id/fork", (req, res) => {
+// Fork a session via SDK
+router.post("/:id/fork", async (req, res) => {
   try {
-    const { messageId } = req.body || {};
-    const session = getSession(req.params.id);
-    if (!session) return res.status(404).json({ error: "Session not found" });
-    if (messageId != null && (typeof messageId !== "number" || messageId < 1)) {
-      return res.status(400).json({ error: "Invalid messageId" });
-    }
-    const forked = dbForkSession(req.params.id, messageId || null);
-    res.json(forked);
+    const result = await sdkForkSession(req.params.id);
+    res.json({ id: result.sessionId, title: null });
   } catch (err) {
-    const status = err.message === "No messages to fork" || err.message === "Session not found" ? 400 : 500;
+    const status = err.message?.includes("not found") ? 400 : 500;
     res.status(status).json({ error: err.message });
   }
 });
 
-// List direct child forks of a session
+// List direct child forks (Claudeck-specific branching)
 router.get("/:id/branches", (req, res) => {
   try {
     res.json(getSessionBranches(req.params.id));
@@ -132,7 +168,7 @@ router.get("/:id/branches", (req, res) => {
   }
 });
 
-// Get full ancestor chain + siblings
+// Get full ancestor chain + siblings (Claudeck-specific branching)
 router.get("/:id/lineage", (req, res) => {
   try {
     res.json(getSessionLineage(req.params.id));

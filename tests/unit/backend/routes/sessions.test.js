@@ -3,14 +3,29 @@ import express from "express";
 import request from "supertest";
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
+
+const mockSdkListSessions = vi.fn(async () => []);
+const mockSdkGetSessionInfo = vi.fn(async () => undefined);
+const mockSdkRenameSession = vi.fn(async () => undefined);
+const mockSdkForkSession = vi.fn(async () => ({ sessionId: "fork-new" }));
+
+vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
+  listSessions: (...args) => mockSdkListSessions(...args),
+  getSessionInfo: (...args) => mockSdkGetSessionInfo(...args),
+  renameSession: (...args) => mockSdkRenameSession(...args),
+  forkSession: (...args) => mockSdkForkSession(...args),
+  query: vi.fn(),
+}));
+
+vi.mock("fs/promises", () => ({
+  unlink: vi.fn(async () => undefined),
+}));
+
 vi.mock("../../../../db.js", () => ({
-  listSessions: vi.fn(() => []),
   deleteSession: vi.fn(),
-  updateSessionTitle: vi.fn(),
   toggleSessionPin: vi.fn(),
-  searchSessions: vi.fn(() => []),
-  forkSession: vi.fn(),
-  getSession: vi.fn(),
+  ensureSession: vi.fn(),
+  getSessionMetaBatch: vi.fn(() => new Map()),
   getSessionBranches: vi.fn(() => []),
   getSessionLineage: vi.fn(() => ({ ancestors: [], siblings: [] })),
 }));
@@ -25,13 +40,10 @@ vi.mock("../../../../server/summarizer.js", () => ({
 
 import sessionsRouter, { setSessionIds } from "../../../../server/routes/sessions.js";
 import {
-  listSessions,
   deleteSession as dbDeleteSession,
-  updateSessionTitle,
   toggleSessionPin,
-  searchSessions,
-  forkSession as dbForkSession,
-  getSession,
+  ensureSession,
+  getSessionMetaBatch,
   getSessionBranches,
   getSessionLineage,
 } from "../../../../db.js";
@@ -57,81 +69,108 @@ describe("sessions routes", () => {
     app = buildApp();
     sessionIds = new Map();
     setSessionIds(sessionIds);
+    mockSdkListSessions.mockResolvedValue([]);
+    mockSdkGetSessionInfo.mockResolvedValue(undefined);
+    mockSdkRenameSession.mockResolvedValue(undefined);
+    mockSdkForkSession.mockResolvedValue({ sessionId: "fork-new" });
+    getSessionMetaBatch.mockReturnValue(new Map());
   });
 
   // ── GET / ──────────────────────────────────────────────────────────────
   describe("GET /sessions", () => {
-    it("returns session list", async () => {
-      const mockSessions = [
-        { id: "s1", title: "Session 1" },
-        { id: "s2", title: "Session 2" },
-      ];
-      listSessions.mockReturnValue(mockSessions);
-
+    it("returns empty array when no project_path", async () => {
       const res = await request(app).get("/sessions");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual([]);
+      expect(mockSdkListSessions).not.toHaveBeenCalled();
+    });
+
+    it("returns mapped session list from SDK", async () => {
+      mockSdkListSessions.mockResolvedValue([
+        {
+          sessionId: "s1",
+          customTitle: "My Session",
+          summary: "A summary",
+          cwd: "/my/project",
+          lastModified: 1700000000000,
+        },
+      ]);
+
+      const res = await request(app).get("/sessions?project_path=/my/project");
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual(mockSessions);
-      expect(listSessions).toHaveBeenCalledWith(20, undefined);
-    });
-
-    it("passes project_path filter to listSessions", async () => {
-      listSessions.mockReturnValue([]);
-
-      await request(app).get("/sessions?project_path=/my/project");
-
-      expect(listSessions).toHaveBeenCalledWith(20, "/my/project");
-    });
-
-    it("returns 500 on database error", async () => {
-      listSessions.mockImplementation(() => {
-        throw new Error("DB failure");
+      expect(res.body).toHaveLength(1);
+      expect(res.body[0]).toMatchObject({
+        id: "s1",
+        title: "My Session",
+        summary: "A summary",
+        project_path: "/my/project",
+        project_name: "project",
+        last_used_at: 1700000000,
+        pinned: 0,
+        mode: "single",
+        parent_session_id: null,
       });
+      expect(mockSdkListSessions).toHaveBeenCalledWith({ dir: "/my/project", limit: 50 });
+    });
 
-      const res = await request(app).get("/sessions");
+    it("augments sessions with DB metadata (pinned, mode)", async () => {
+      mockSdkListSessions.mockResolvedValue([{ sessionId: "s1", cwd: "/p", lastModified: 0 }]);
+      getSessionMetaBatch.mockReturnValue(new Map([["s1", { pinned: 1, mode: "parallel" }]]));
+
+      const res = await request(app).get("/sessions?project_path=/p");
+
+      expect(res.body[0]).toMatchObject({ id: "s1", pinned: 1, mode: "parallel" });
+    });
+
+    it("returns 500 on SDK error", async () => {
+      mockSdkListSessions.mockRejectedValue(new Error("SDK failure"));
+
+      const res = await request(app).get("/sessions?project_path=/p");
 
       expect(res.status).toBe(500);
-      expect(res.body.error).toBe("DB failure");
+      expect(res.body.error).toBe("SDK failure");
     });
   });
 
   // ── GET /search ────────────────────────────────────────────────────────
   describe("GET /sessions/search", () => {
-    it("searches sessions with query param", async () => {
-      const results = [{ id: "s1", title: "Matching session" }];
-      searchSessions.mockReturnValue(results);
-
+    it("returns empty array when no project_path", async () => {
       const res = await request(app).get("/sessions/search?q=test");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual([]);
+    });
+
+    it("filters sessions by summary, customTitle, firstPrompt", async () => {
+      mockSdkListSessions.mockResolvedValue([
+        { sessionId: "s1", summary: "talks about testing", cwd: "/p", lastModified: 0 },
+        { sessionId: "s2", customTitle: "My test session", cwd: "/p", lastModified: 0 },
+        { sessionId: "s3", firstPrompt: "test this code", cwd: "/p", lastModified: 0 },
+        { sessionId: "s4", summary: "unrelated topic", cwd: "/p", lastModified: 0 },
+      ]);
+
+      const res = await request(app).get("/sessions/search?q=test&project_path=/p");
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual(results);
-      expect(searchSessions).toHaveBeenCalledWith("test", 20, undefined);
+      expect(res.body.map((s) => s.id)).toEqual(["s1", "s2", "s3"]);
     });
 
-    it("passes project_path to search", async () => {
-      searchSessions.mockReturnValue([]);
+    it("returns all sessions when query is empty", async () => {
+      mockSdkListSessions.mockResolvedValue([
+        { sessionId: "s1", cwd: "/p", lastModified: 0 },
+        { sessionId: "s2", cwd: "/p", lastModified: 0 },
+      ]);
 
-      await request(app).get(
-        "/sessions/search?q=hello&project_path=/proj",
-      );
+      const res = await request(app).get("/sessions/search?project_path=/p");
 
-      expect(searchSessions).toHaveBeenCalledWith("hello", 20, "/proj");
-    });
-
-    it("defaults to empty string when q is missing", async () => {
-      searchSessions.mockReturnValue([]);
-
-      await request(app).get("/sessions/search");
-
-      expect(searchSessions).toHaveBeenCalledWith("", 20, undefined);
+      expect(res.body).toHaveLength(2);
+      expect(mockSdkListSessions).toHaveBeenCalledWith({ dir: "/p", limit: 200 });
     });
 
     it("returns 500 on error", async () => {
-      searchSessions.mockImplementation(() => {
-        throw new Error("Search failed");
-      });
+      mockSdkListSessions.mockRejectedValue(new Error("Search failed"));
 
-      const res = await request(app).get("/sessions/search?q=test");
+      const res = await request(app).get("/sessions/search?q=test&project_path=/p");
       expect(res.status).toBe(500);
     });
   });
@@ -172,23 +211,21 @@ describe("sessions routes", () => {
 
   // ── PUT /:id/title ────────────────────────────────────────────────────
   describe("PUT /sessions/:id/title", () => {
-    it("updates session title", async () => {
+    it("renames session via SDK", async () => {
       const res = await request(app)
         .put("/sessions/s1/title")
         .send({ title: "New Title" });
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ ok: true });
-      expect(updateSessionTitle).toHaveBeenCalledWith("s1", "New Title");
+      expect(mockSdkRenameSession).toHaveBeenCalledWith("s1", "New Title");
     });
 
     it("truncates title to 200 characters", async () => {
       const longTitle = "x".repeat(300);
-      await request(app)
-        .put("/sessions/s1/title")
-        .send({ title: longTitle });
+      await request(app).put("/sessions/s1/title").send({ title: longTitle });
 
-      expect(updateSessionTitle).toHaveBeenCalledWith("s1", "x".repeat(200));
+      expect(mockSdkRenameSession).toHaveBeenCalledWith("s1", "x".repeat(200));
     });
 
     it("returns 400 when title is not a string", async () => {
@@ -198,38 +235,34 @@ describe("sessions routes", () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toBe("title is required");
-      expect(updateSessionTitle).not.toHaveBeenCalled();
+      expect(mockSdkRenameSession).not.toHaveBeenCalled();
     });
 
     it("returns 400 when title is missing", async () => {
-      const res = await request(app)
-        .put("/sessions/s1/title")
-        .send({});
-
+      const res = await request(app).put("/sessions/s1/title").send({});
       expect(res.status).toBe(400);
     });
 
-    it("returns 500 when updateSessionTitle throws", async () => {
-      updateSessionTitle.mockImplementation(() => {
-        throw new Error("Title update failed");
-      });
+    it("returns 500 when SDK rename throws", async () => {
+      mockSdkRenameSession.mockRejectedValue(new Error("Rename failed"));
 
       const res = await request(app)
         .put("/sessions/s1/title")
         .send({ title: "Valid" });
 
       expect(res.status).toBe(500);
-      expect(res.body.error).toBe("Title update failed");
+      expect(res.body.error).toBe("Rename failed");
     });
   });
 
   // ── PUT /:id/pin ──────────────────────────────────────────────────────
   describe("PUT /sessions/:id/pin", () => {
-    it("toggles session pin", async () => {
+    it("ensures session row exists then toggles pin", async () => {
       const res = await request(app).put("/sessions/s1/pin");
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ ok: true });
+      expect(ensureSession).toHaveBeenCalledWith("s1");
       expect(toggleSessionPin).toHaveBeenCalledWith("s1");
     });
 
@@ -249,7 +282,6 @@ describe("sessions routes", () => {
       getActiveSessionIds.mockReturnValue(["s1", "s2"]);
 
       const res = await request(app).get("/sessions/active");
-
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ activeSessionIds: ["s1", "s2"] });
@@ -288,104 +320,31 @@ describe("sessions routes", () => {
 
   // ── POST /:id/fork ──────────────────────────────────────────────────
   describe("POST /sessions/:id/fork", () => {
-    it("forks a session and returns the new session", async () => {
-      const forkedSession = { id: "fork-1", title: "Fork of: Test", parent_session_id: "s1" };
-      getSession.mockReturnValue({ id: "s1", title: "Test" });
-      dbForkSession.mockReturnValue(forkedSession);
-
-      const res = await request(app)
-        .post("/sessions/s1/fork")
-        .send({ messageId: 42 });
-
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual(forkedSession);
-      expect(dbForkSession).toHaveBeenCalledWith("s1", 42);
-    });
-
-    it("forks without messageId (defaults to null)", async () => {
-      const forkedSession = { id: "fork-1", title: "Fork of: Test", parent_session_id: "s1" };
-      getSession.mockReturnValue({ id: "s1", title: "Test" });
-      dbForkSession.mockReturnValue(forkedSession);
-
-      const res = await request(app)
-        .post("/sessions/s1/fork")
-        .send({});
-
-      expect(res.status).toBe(200);
-      expect(dbForkSession).toHaveBeenCalledWith("s1", null);
-    });
-
-    it("forks with empty body (no JSON)", async () => {
-      const forkedSession = { id: "fork-1", title: "Fork of: Test", parent_session_id: "s1" };
-      getSession.mockReturnValue({ id: "s1", title: "Test" });
-      dbForkSession.mockReturnValue(forkedSession);
+    it("forks a session via SDK and returns new session id", async () => {
+      mockSdkForkSession.mockResolvedValue({ sessionId: "fork-new-1" });
 
       const res = await request(app).post("/sessions/s1/fork");
 
       expect(res.status).toBe(200);
-      expect(dbForkSession).toHaveBeenCalledWith("s1", null);
+      expect(res.body).toEqual({ id: "fork-new-1", title: null });
+      expect(mockSdkForkSession).toHaveBeenCalledWith("s1");
     });
 
-    it("returns 404 when session does not exist", async () => {
-      getSession.mockReturnValue(undefined);
+    it("returns 400 on not-found error from SDK", async () => {
+      mockSdkForkSession.mockRejectedValue(new Error("session not found"));
 
-      const res = await request(app)
-        .post("/sessions/nonexistent/fork")
-        .send({ messageId: 1 });
-
-      expect(res.status).toBe(404);
-      expect(res.body.error).toBe("Session not found");
-      expect(dbForkSession).not.toHaveBeenCalled();
-    });
-
-    it("returns 400 when messageId is invalid (non-number)", async () => {
-      getSession.mockReturnValue({ id: "s1" });
-
-      const res = await request(app)
-        .post("/sessions/s1/fork")
-        .send({ messageId: "abc" });
+      const res = await request(app).post("/sessions/nonexistent/fork");
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toBe("Invalid messageId");
     });
 
-    it("returns 400 when messageId is zero or negative", async () => {
-      getSession.mockReturnValue({ id: "s1" });
+    it("returns 500 on unexpected SDK error", async () => {
+      mockSdkForkSession.mockRejectedValue(new Error("Unexpected error"));
 
-      const res = await request(app)
-        .post("/sessions/s1/fork")
-        .send({ messageId: 0 });
-
-      expect(res.status).toBe(400);
-      expect(res.body.error).toBe("Invalid messageId");
-    });
-
-    it("returns 400 when session has no messages", async () => {
-      getSession.mockReturnValue({ id: "s1" });
-      dbForkSession.mockImplementation(() => {
-        throw new Error("No messages to fork");
-      });
-
-      const res = await request(app)
-        .post("/sessions/s1/fork")
-        .send({});
-
-      expect(res.status).toBe(400);
-      expect(res.body.error).toBe("No messages to fork");
-    });
-
-    it("returns 500 on unexpected error", async () => {
-      getSession.mockReturnValue({ id: "s1" });
-      dbForkSession.mockImplementation(() => {
-        throw new Error("Unexpected DB error");
-      });
-
-      const res = await request(app)
-        .post("/sessions/s1/fork")
-        .send({ messageId: 1 });
+      const res = await request(app).post("/sessions/s1/fork");
 
       expect(res.status).toBe(500);
-      expect(res.body.error).toBe("Unexpected DB error");
+      expect(res.body.error).toBe("Unexpected error");
     });
   });
 
