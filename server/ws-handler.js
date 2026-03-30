@@ -687,7 +687,12 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
   const queryKey = chatId || "__default__";
 
   const sessionKey = chatId ? `${clientSid}::${chatId}` : clientSid;
-  const resumeId = clientSid ? sessionIds.get(sessionKey) : undefined;
+  // Resolve the Claude session ID to resume:
+  //  1. In-memory map (active sessions this server run, restored from DB on startup)
+  //  2. clientSid itself — SDK-listed sessions use the Claude session ID directly as their ID
+  const resumeId = clientSid
+    ? (sessionIds.get(sessionKey) ?? clientSid)
+    : undefined;
 
   if (clientSid && getSession(clientSid)) {
     touchSession(clientSid);
