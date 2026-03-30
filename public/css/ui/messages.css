@@ -671,6 +671,44 @@ html[data-theme="light"] .msg-user {
   word-break: break-word;
 }
 
+.thinking-block {
+  max-width: var(--chat-max-w);
+  width: 100%;
+  margin: 2px auto;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.thinking-block-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--accent);
+  font-family: var(--font-display);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  list-style: none;
+}
+
+.thinking-block-summary::-webkit-details-marker { display: none; }
+
+.thinking-block-body {
+  padding: 8px 12px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
 .thinking-bar {
   display: flex;
   align-items: center;

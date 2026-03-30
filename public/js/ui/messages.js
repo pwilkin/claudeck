@@ -306,6 +306,22 @@ export function addSkillUsedMessage(skillName, skillDescription, pane) {
   scrollToBottom(pane);
 }
 
+export function appendThinkingBlock(thinking, redacted, pane) {
+  pane = pane || getPane(null);
+  const details = document.createElement("details");
+  details.className = "thinking-block";
+  const summary = document.createElement("summary");
+  summary.className = "thinking-block-summary";
+  summary.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg> Thinking`;
+  details.appendChild(summary);
+  const body = document.createElement("div");
+  body.className = "thinking-block-body";
+  body.textContent = redacted ? "(thinking content redacted)" : (thinking || "");
+  details.appendChild(body);
+  pane.messagesDiv.appendChild(details);
+  scrollToBottom(pane);
+}
+
 export function appendCliOutput(data, pane) {
   pane = pane || getPane(null);
   const div = document.createElement("div");
@@ -369,6 +385,11 @@ export function renderMessagesIntoPane(messages, pane) {
         addUserMessage(cleanText, pane, data.images || [], savedFilePaths);
         break;
       }
+      case "thinking":
+        appendThinkingBlock(data.thinking, data.redacted, pane);
+        if (!lastAssistantMsgEl) lastAssistantMsgEl = pane.messagesDiv.lastElementChild;
+        lastAssistantMsgId = msg.id;
+        break;
       case "assistant":
         appendAssistantText(data.text, pane);
         // Track this assistant message element for fork button
