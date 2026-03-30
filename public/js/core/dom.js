@@ -130,6 +130,12 @@ export const $ = {
   // Session search
   sessionSearchInput: document.getElementById("session-search"),
 
+  // Session usage bar (5-hour window)
+  sessionUsage: document.getElementById("sb-session-usage"),
+  sessionUsageFill: document.getElementById("sb-session-usage-fill"),
+  sessionUsageLabel: document.getElementById("sb-session-usage-label"),
+  sessionUsageSep: document.getElementById("sb-session-usage-sep"),
+
   // Context gauge
   contextGauge: document.getElementById("context-gauge"),
   contextGaugeFill: document.getElementById("context-gauge-fill"),

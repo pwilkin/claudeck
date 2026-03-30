@@ -33,6 +33,11 @@ class StatusBar extends HTMLElement {
         <span id="sb-tokens-value">~0 tokens</span>
       </span>
       <span class="sb-sep sb-tokens-sep hidden" id="sb-tokens-sep"></span>
+      <span class="sb-item sb-session-usage hidden" id="sb-session-usage" title="Claude Code 5-hour session usage">
+        <span id="sb-session-usage-fill-wrap" class="session-usage-bar-wrap"><span id="sb-session-usage-fill" class="session-usage-bar-fill"></span></span>
+        <span id="sb-session-usage-label" class="session-usage-label">0%</span>
+      </span>
+      <span class="sb-sep hidden" id="sb-session-usage-sep"></span>
       <span class="sb-item sb-context-gauge" id="sb-context-gauge-item">
         <span id="context-gauge" class="context-gauge hidden" title="Session context usage">
           <span class="context-gauge-bar"><span id="context-gauge-fill" class="context-gauge-fill"></span></span>

@@ -24,6 +24,7 @@ import { getSelectedModel } from '../ui/model-selector.js';
 import { getMaxTurns } from '../ui/max-turns.js';
 import { getDisabledTools } from '../ui/disabled-tools.js';
 import { updateContextGauge, resetContextGauge, loadContextGauge } from '../ui/context-gauge.js';
+import { updateSessionUsage } from '../ui/session-usage.js';
 import { InputHistory, handleHistoryKeydown } from './input-history.js';
 
 // ── "Waiting for input" indicator ──
@@ -465,10 +466,14 @@ function handleServerMessage(msg) {
       showThinking("Thinking...", pane);
       break;
 
+    case "rate_limit":
+      updateSessionUsage(msg);
+      break;
+
     case "result":
       removeThinking(pane);
       addResultSummary(msg, pane);
-      updateContextGauge(msg.input_tokens, msg.output_tokens, msg.cache_read_tokens, msg.cache_creation_tokens);
+      updateContextGauge(msg.input_tokens, msg.output_tokens, msg.cache_read_tokens, msg.cache_creation_tokens, msg.context_window);
       if (msg.totalCost != null) {
         $.totalCostEl.textContent = "$" + msg.totalCost.toFixed(2);
       }

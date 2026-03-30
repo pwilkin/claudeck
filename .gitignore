@@ -6,3 +6,6 @@ data.db-wal
 
 # Test coverage
 coverage/
+
+# Misc
+.playwright-mcp

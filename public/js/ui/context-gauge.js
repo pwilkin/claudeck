@@ -1,16 +1,10 @@
-// Context Window Indicator — cumulative session token gauge (status bar)
+// Context Window Indicator — real context usage from SDK (status bar)
 import { getState, setState } from '../core/store.js';
 import { $ } from '../core/dom.js';
 
 const sbGaugeSep = document.getElementById("sb-gauge-sep");
 
-const MODEL_LIMITS = {
-  default: 200_000,
-};
-
-function getLimit() {
-  return MODEL_LIMITS.default;
-}
+const DEFAULT_CONTEXT_WINDOW = 200_000;
 
 function formatTokens(n) {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
@@ -21,18 +15,15 @@ function formatTokens(n) {
 function renderGauge(tokens) {
   if (!$.contextGauge) return;
 
+  const limit = tokens.contextWindow || DEFAULT_CONTEXT_WINDOW;
   const total = tokens.input + tokens.output + tokens.cacheRead + tokens.cacheCreation;
-  const limit = getLimit();
   const pct = Math.min((total / limit) * 100, 100);
 
-  // Show gauge
   $.contextGauge.classList.remove('hidden');
   if (sbGaugeSep) sbGaugeSep.classList.remove('hidden');
 
-  // Fill width
   $.contextGaugeFill.style.width = pct + '%';
 
-  // Color class
   $.contextGaugeFill.classList.remove('warning', 'critical');
   $.contextGauge.classList.remove('warning', 'critical');
   if (pct >= 80) {
@@ -43,31 +34,32 @@ function renderGauge(tokens) {
     $.contextGauge.classList.add('warning');
   }
 
-  // Label
-  $.contextGaugeLabel.textContent = `${formatTokens(total)}/${formatTokens(limit)}`;
+  $.contextGaugeLabel.textContent = `${formatTokens(total)}/${formatTokens(limit)} · ${pct.toFixed(0)}%`;
 
-  // Tooltip breakdown
   $.contextGauge.title = [
     `Input: ${formatTokens(tokens.input)}`,
     `Output: ${formatTokens(tokens.output)}`,
     `Cache Read: ${formatTokens(tokens.cacheRead)}`,
     `Cache Create: ${formatTokens(tokens.cacheCreation)}`,
-    `Total: ${formatTokens(total)} / ${formatTokens(limit)}`,
+    `Total: ${formatTokens(total)} / ${formatTokens(limit)} (${pct.toFixed(1)}%)`,
   ].join('\n');
 }
 
-export function updateContextGauge(input, output, cacheRead, cacheCreation) {
-  const tokens = getState('sessionTokens');
-  tokens.input += (input || 0);
-  tokens.output += (output || 0);
-  tokens.cacheRead += (cacheRead || 0);
-  tokens.cacheCreation += (cacheCreation || 0);
-  setState('sessionTokens', { ...tokens });
+export function updateContextGauge(input, output, cacheRead, cacheCreation, contextWindow) {
+  // Use values directly from SDK — input_tokens already reflects full conversation context
+  const tokens = {
+    input: input || 0,
+    output: output || 0,
+    cacheRead: cacheRead || 0,
+    cacheCreation: cacheCreation || 0,
+    contextWindow: contextWindow || getState('sessionTokens')?.contextWindow || null,
+  };
+  setState('sessionTokens', tokens);
   renderGauge(tokens);
 }
 
 export function resetContextGauge() {
-  const fresh = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
+  const fresh = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, contextWindow: null };
   setState('sessionTokens', fresh);
   if ($.contextGauge) $.contextGauge.classList.add('hidden');
   if (sbGaugeSep) sbGaugeSep.classList.add('hidden');
@@ -77,16 +69,23 @@ export async function loadContextGauge(sessionId) {
   if (!sessionId) return;
   try {
     const messages = await (await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/messages-single`)).json();
-    const tokens = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
+    // Use only the last result message — SDK input_tokens already includes full conversation history
+    let lastResult = null;
     for (const msg of messages) {
-      if (msg.role === 'result') {
-        const data = JSON.parse(msg.content);
-        tokens.input += (data.input_tokens || 0);
-        tokens.output += (data.output_tokens || 0);
-        tokens.cacheRead += (data.cache_read_tokens || 0);
-        tokens.cacheCreation += (data.cache_creation_tokens || 0);
-      }
+      if (msg.role === 'result') lastResult = msg;
     }
+    if (!lastResult) {
+      if ($.contextGauge) $.contextGauge.classList.add('hidden');
+      return;
+    }
+    const data = JSON.parse(lastResult.content);
+    const tokens = {
+      input: data.input_tokens || 0,
+      output: data.output_tokens || 0,
+      cacheRead: data.cache_read_tokens || 0,
+      cacheCreation: data.cache_creation_tokens || 0,
+      contextWindow: data.context_window || null,
+    };
     setState('sessionTokens', tokens);
     const total = tokens.input + tokens.output + tokens.cacheRead + tokens.cacheCreation;
     if (total > 0) {

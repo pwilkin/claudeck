@@ -942,10 +942,13 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
         const cacheReadTokens = sdkMsg.usage?.cache_read_input_tokens || 0;
         const cacheCreationTokens = sdkMsg.usage?.cache_creation_input_tokens || 0;
         const model = Object.keys(sdkMsg.modelUsage || {})[0] || turnState.sessionModel;
+        const modelUsageEntry = sdkMsg.modelUsage?.[model] || {};
+        const contextWindow = modelUsageEntry.contextWindow || null;
+        const maxOutputTokens = modelUsageEntry.maxOutputTokens || null;
         if (sid) addCost(sid, sdkMsg.total_cost_usd || 0, sdkMsg.duration_ms || 0, sdkMsg.num_turns || 0, inputTokens, outputTokens, { model, stopReason: "success", isError: 0, cacheReadTokens, cacheCreationTokens });
-        wsSend({ type: "result", duration_ms: sdkMsg.duration_ms, num_turns: sdkMsg.num_turns, cost_usd: sdkMsg.total_cost_usd, totalCost: getTotalCost(), input_tokens: inputTokens, output_tokens: outputTokens, cache_read_tokens: cacheReadTokens, cache_creation_tokens: cacheCreationTokens, model, stop_reason: "success" });
+        wsSend({ type: "result", duration_ms: sdkMsg.duration_ms, num_turns: sdkMsg.num_turns, cost_usd: sdkMsg.total_cost_usd, totalCost: getTotalCost(), input_tokens: inputTokens, output_tokens: outputTokens, cache_read_tokens: cacheReadTokens, cache_creation_tokens: cacheCreationTokens, model, stop_reason: "success", context_window: contextWindow, max_output_tokens: maxOutputTokens });
         turnState.lastChatMetrics = { durationMs: sdkMsg.duration_ms, costUsd: sdkMsg.total_cost_usd, inputTokens, outputTokens, model, turns: sdkMsg.num_turns, isError: false };
-        if (sid) addMessage(sid, "result", JSON.stringify({ duration_ms: sdkMsg.duration_ms, num_turns: sdkMsg.num_turns, cost_usd: sdkMsg.total_cost_usd, input_tokens: inputTokens, output_tokens: outputTokens, cache_read_tokens: cacheReadTokens, cache_creation_tokens: cacheCreationTokens, model, stop_reason: "success" }), chatId || null);
+        if (sid) addMessage(sid, "result", JSON.stringify({ duration_ms: sdkMsg.duration_ms, num_turns: sdkMsg.num_turns, cost_usd: sdkMsg.total_cost_usd, input_tokens: inputTokens, output_tokens: outputTokens, cache_read_tokens: cacheReadTokens, cache_creation_tokens: cacheCreationTokens, model, stop_reason: "success", context_window: contextWindow, max_output_tokens: maxOutputTokens }), chatId || null);
       } else if (sdkMsg.subtype === "error_max_turns") {
         const sid = turnState.resolvedSid;
         const inputTokens = sdkMsg.usage?.input_tokens || 0;
@@ -953,8 +956,11 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
         const cacheReadTokens = sdkMsg.usage?.cache_read_input_tokens || 0;
         const cacheCreationTokens = sdkMsg.usage?.cache_creation_input_tokens || 0;
         const model = Object.keys(sdkMsg.modelUsage || {})[0] || turnState.sessionModel;
+        const modelUsageEntry = sdkMsg.modelUsage?.[model] || {};
+        const contextWindow = modelUsageEntry.contextWindow || null;
+        const maxOutputTokens = modelUsageEntry.maxOutputTokens || null;
         if (sid) addCost(sid, sdkMsg.total_cost_usd || 0, sdkMsg.duration_ms || 0, sdkMsg.num_turns || 0, inputTokens, outputTokens, { model, stopReason: "error_max_turns", isError: 0, cacheReadTokens, cacheCreationTokens });
-        wsSend({ type: "result", duration_ms: sdkMsg.duration_ms, num_turns: sdkMsg.num_turns, cost_usd: sdkMsg.total_cost_usd, totalCost: getTotalCost(), input_tokens: inputTokens, output_tokens: outputTokens, cache_read_tokens: cacheReadTokens, cache_creation_tokens: cacheCreationTokens, model, stop_reason: "error_max_turns" });
+        wsSend({ type: "result", duration_ms: sdkMsg.duration_ms, num_turns: sdkMsg.num_turns, cost_usd: sdkMsg.total_cost_usd, totalCost: getTotalCost(), input_tokens: inputTokens, output_tokens: outputTokens, cache_read_tokens: cacheReadTokens, cache_creation_tokens: cacheCreationTokens, model, stop_reason: "error_max_turns", context_window: contextWindow, max_output_tokens: maxOutputTokens });
         wsSend({ type: "error", error: `Reached max turns limit (${sdkMsg.num_turns}). Send another message to continue.` });
       } else if (sdkMsg.subtype?.startsWith("error")) {
         const errMsg = sdkMsg.errors?.join(", ") || sdkMsg.error || sdkMsg.message || "Unknown error";
@@ -1001,6 +1007,11 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
       return;
     }
 
+    if (sdkMsg.type === "rate_limit_event") {
+      wsSend({ type: "rate_limit", ...sdkMsg.rate_limit_info });
+      return;
+    }
+
     if (sdkMsg.type === "abort") {
       if (turnState.resolvedSid) {
         addMessage(turnState.resolvedSid, "aborted", JSON.stringify({ aborted: true }), chatId || null);
@@ -1036,6 +1047,7 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
 
   // Create the persistent session
   createOrResumeSession(sessionKey, opts, onMessage);
+  pushToSession(sessionKey, message, images);
 
   // Record user message in DB
   if (clientSid) {
