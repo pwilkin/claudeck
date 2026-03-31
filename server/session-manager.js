@@ -122,7 +122,7 @@ export function sendToSession(sessionKey, message, images, claudeSessionId) {
 export function abortSession(sessionKey) {
   const session = sessions.get(sessionKey);
   if (!session) return;
-  session.abortController.abort();
+  try { session.query.interrupt(); } catch { /* exists */ }
   session.stream.close();
 }
 
