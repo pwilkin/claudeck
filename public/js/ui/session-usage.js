@@ -2,6 +2,10 @@
 import { $ } from '../core/dom.js';
 
 const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
+const REFRESH_INTERVAL_MS = 30_000;
+
+let lastInfo = null;
+let timerId = null;
 
 function formatTimeLeft(resetsAtSec) {
   const msLeft = resetsAtSec * 1000 - Date.now();
@@ -11,12 +15,11 @@ function formatTimeLeft(resetsAtSec) {
   return h > 0 ? `${h}h${m}m` : `${m}m`;
 }
 
-export function updateSessionUsage(info) {
+function renderSessionUsage(info) {
   if (!$.sessionUsage) return;
 
   const { status, utilization, resetsAt, rateLimitType } = info;
 
-  // Compute percentage: use SDK utilization when available, otherwise derive from resetsAt
   let pct;
   if (utilization != null) {
     pct = Math.min(utilization * 100, 100);
@@ -25,7 +28,7 @@ export function updateSessionUsage(info) {
     const elapsed = Date.now() - windowStartMs;
     pct = Math.min((elapsed / FIVE_HOURS_MS) * 100, 100);
   } else {
-    return; // nothing to show
+    return;
   }
 
   const isWarning = status === 'allowed_warning' || pct >= 75;
@@ -56,3 +59,36 @@ export function updateSessionUsage(info) {
   $.sessionUsage.classList.remove('hidden');
   if ($.sessionUsageSep) $.sessionUsageSep.classList.remove('hidden');
 }
+
+function startRefreshTimer() {
+  stopRefreshTimer();
+  timerId = setInterval(() => {
+    if (lastInfo) renderSessionUsage(lastInfo);
+  }, REFRESH_INTERVAL_MS);
+}
+
+function stopRefreshTimer() {
+  if (timerId != null) {
+    clearInterval(timerId);
+    timerId = null;
+  }
+}
+
+export function updateSessionUsage(info) {
+  lastInfo = info;
+  renderSessionUsage(info);
+  if (!timerId) startRefreshTimer();
+}
+
+export function resetSessionUsage() {
+  lastInfo = null;
+  stopRefreshTimer();
+  if ($.sessionUsage) $.sessionUsage.classList.add('hidden');
+  if ($.sessionUsageSep) $.sessionUsageSep.classList.add('hidden');
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && lastInfo) {
+    renderSessionUsage(lastInfo);
+  }
+});

@@ -24,7 +24,7 @@ import { getSelectedModel } from '../ui/model-selector.js';
 import { getMaxTurns } from '../ui/max-turns.js';
 import { getDisabledTools } from '../ui/disabled-tools.js';
 import { updateContextGauge, resetContextGauge, loadContextGauge } from '../ui/context-gauge.js';
-import { updateSessionUsage } from '../ui/session-usage.js';
+import { updateSessionUsage, resetSessionUsage } from '../ui/session-usage.js';
 import { InputHistory, handleHistoryKeydown } from './input-history.js';
 
 // ── "Waiting for input" indicator ──
@@ -440,6 +440,7 @@ function handleServerMessage(msg) {
     case "session":
       setState("sessionId", msg.sessionId);
       resetContextGauge();
+      resetSessionUsage();
       hideWaitingForInput(pane);
       loadSessions();
       showThinking("Thinking...", pane);
@@ -579,6 +580,7 @@ function handleServerMessage(msg) {
 
     case "compact_boundary":
       resetContextGauge();
+      resetSessionUsage();
       break;
 
     case "worktree_created":

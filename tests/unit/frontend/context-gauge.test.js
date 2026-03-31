@@ -1,7 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-let mockTokens;
 const mockGetState = vi.fn();
 const mockSetState = vi.fn();
 
@@ -43,10 +42,10 @@ let updateContextGauge, resetContextGauge;
 beforeEach(async () => {
   vi.resetModules();
 
-  mockTokens = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
+  const freshTokens = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, contextWindow: null };
   mockGetState.mockReset();
   mockSetState.mockReset();
-  mockGetState.mockReturnValue(mockTokens);
+  mockGetState.mockReturnValue(freshTokens);
 
   // Reset mock DOM element state
   mockContextGauge.classList._classes.clear();
@@ -77,28 +76,30 @@ describe("context-gauge", () => {
   describe("updateContextGauge", () => {
     it("accumulates input tokens and calls setState", () => {
       updateContextGauge(100, 0, 0, 0);
-      expect(mockTokens.input).toBe(100);
       expect(mockSetState).toHaveBeenCalledWith("sessionTokens", expect.objectContaining({ input: 100 }));
     });
 
-    it("accumulates all token types", () => {
+    it("passes all token types to setState", () => {
       updateContextGauge(100, 50, 200, 30);
-      expect(mockTokens.input).toBe(100);
-      expect(mockTokens.output).toBe(50);
-      expect(mockTokens.cacheRead).toBe(200);
-      expect(mockTokens.cacheCreation).toBe(30);
+      expect(mockSetState).toHaveBeenCalledWith("sessionTokens", expect.objectContaining({
+        input: 100,
+        output: 50,
+        cacheRead: 200,
+        cacheCreation: 30,
+      }));
     });
 
-    it("accumulates across multiple calls", () => {
+    it("replaces tokens on each call (no accumulation)", () => {
       updateContextGauge(100, 0, 0, 0);
       updateContextGauge(50, 0, 0, 0);
-      expect(mockTokens.input).toBe(150);
+      expect(mockContextGaugeLabel.textContent).toContain("50");
+      expect(mockContextGaugeLabel.textContent).not.toContain("150");
     });
 
     it("renders gauge label with formatted tokens", () => {
       updateContextGauge(1500, 500, 0, 0);
-      // total = 2000, limit = 200000
-      expect(mockContextGaugeLabel.textContent).toBe("2.0k/200.0k");
+      // total = 2000, limit = 200000, pct = 1%
+      expect(mockContextGaugeLabel.textContent).toBe("2.0k/200.0k · 1%");
     });
 
     it("sets gauge fill width as percentage", () => {
@@ -133,8 +134,10 @@ describe("context-gauge", () => {
 
     it("handles undefined/null token values gracefully", () => {
       updateContextGauge(undefined, null, undefined, null);
-      expect(mockTokens.input).toBe(0);
-      expect(mockTokens.output).toBe(0);
+      expect(mockSetState).toHaveBeenCalledWith("sessionTokens", expect.objectContaining({
+        input: 0,
+        output: 0,
+      }));
     });
   });
 
@@ -146,6 +149,7 @@ describe("context-gauge", () => {
         output: 0,
         cacheRead: 0,
         cacheCreation: 0,
+        contextWindow: null,
       });
     });
 
@@ -169,7 +173,7 @@ describe("context-gauge", () => {
 
     it("formats small numbers as plain string", () => {
       updateContextGauge(500, 0, 0, 0);
-      expect(mockContextGaugeLabel.textContent).toBe("500/200.0k");
+      expect(mockContextGaugeLabel.textContent).toBe("500/200.0k · 0%");
     });
   });
 });
