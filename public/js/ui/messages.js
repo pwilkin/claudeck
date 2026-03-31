@@ -320,6 +320,18 @@ export function appendThinkingBlock(thinking, redacted, pane) {
   details.appendChild(body);
   pane.messagesDiv.appendChild(details);
   scrollToBottom(pane);
+
+  // Include thinking content in streaming token counter
+  if (!redacted && thinking) {
+    let count = getState("streamingCharCount") + thinking.length;
+    setState("streamingCharCount", count);
+    const tokenEst = Math.round(count / 4);
+    if ($.streamingTokens) {
+      if ($.streamingTokensValue) $.streamingTokensValue.textContent = `~${tokenEst} tokens`;
+      $.streamingTokens.classList.remove("hidden");
+      if ($.streamingTokensSep) $.streamingTokensSep.classList.remove("hidden");
+    }
+  }
 }
 
 export function appendCliOutput(data, pane) {

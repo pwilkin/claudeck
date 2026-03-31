@@ -149,6 +149,9 @@ on("ws:message", (msg) => {
       ? `running ${msg.name}...`
       : "streaming...";
   }
+  if (msg.type === "thinking") {
+    sbActivity.textContent = "thinking...";
+  }
   if (msg.type === "done" || msg.type === "aborted" || msg.type === "error") {
     sbActivity.textContent = "";
   }
