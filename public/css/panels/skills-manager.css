@@ -378,6 +378,14 @@
   min-height: 16px;
 }
 
+.skills-modal-hint {
+  font-size: 10px;
+  color: var(--fg-muted);
+  margin-top: -8px;
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+
 /* ── Drop zone ───────────────────────────────────────── */
 
 .skills-modal-drop-zone {

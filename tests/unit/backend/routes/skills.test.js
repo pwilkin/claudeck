@@ -181,6 +181,56 @@ describe("skills routes", () => {
     });
   });
 
+  // ── POST /install-from-github ─────────────────────────────────────────────
+
+  describe("POST /skills/install-from-github", () => {
+    it("rejects missing githubUrl", async () => {
+      const res = await request(app)
+        .post("/skills/install-from-github")
+        .send({ scope: "global" });
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects unparseable URL", async () => {
+      const res = await request(app)
+        .post("/skills/install-from-github")
+        .send({ githubUrl: "https://example.com/foo", scope: "global" });
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects project scope without projectPath", async () => {
+      const res = await request(app)
+        .post("/skills/install-from-github")
+        .send({ githubUrl: "https://github.com/owner/repo/tree/main/skill", scope: "project" });
+      expect(res.status).toBe(400);
+    });
+  });
+
+  // ── POST /install-from-github ─────────────────────────────────────────────
+
+  describe("POST /skills/install-from-github", () => {
+    it("rejects missing githubUrl", async () => {
+      const res = await request(app)
+        .post("/skills/install-from-github")
+        .send({ scope: "global" });
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects unparseable URL", async () => {
+      const res = await request(app)
+        .post("/skills/install-from-github")
+        .send({ githubUrl: "https://example.com/foo", scope: "global" });
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects project scope without projectPath", async () => {
+      const res = await request(app)
+        .post("/skills/install-from-github")
+        .send({ githubUrl: "https://github.com/owner/repo/tree/main/skill", scope: "project" });
+      expect(res.status).toBe(400);
+    });
+  });
+
   // ── POST /install-from-archive ────────────────────────────────────────────
 
   describe("POST /skills/install-from-archive", () => {

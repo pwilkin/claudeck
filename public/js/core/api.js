@@ -654,6 +654,15 @@ export async function installSkillFromPath(body) {
   return res.json();
 }
 
+export async function installSkillFromGitHub({ githubUrl, scope, projectPath }) {
+  const res = await fetch("/api/skills/install-from-github", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ githubUrl, scope, projectPath }),
+  });
+  return res.json();
+}
+
 export async function installSkillFromArchive({ file, scope, projectPath }) {
   const data = await new Promise((resolve, reject) => {
     const reader = new FileReader();

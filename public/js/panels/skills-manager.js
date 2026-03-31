@@ -6,6 +6,7 @@ const ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke
 const TRASH_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>';
 const FOLDER_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>';
 const ARCHIVE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>';
+const GITHUB_SVG = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>';
 
 let ctx = null;
 let root = null;
@@ -69,12 +70,18 @@ function renderPanel() {
   dirBtn.innerHTML = `${FOLDER_SVG} From Directory`;
   dirBtn.addEventListener("click", () => showAddFromDirectory());
 
+  const ghBtn = document.createElement("button");
+  ghBtn.className = "skills-add-btn";
+  ghBtn.innerHTML = `${GITHUB_SVG} From GitHub`;
+  ghBtn.addEventListener("click", () => showAddFromGitHub());
+
   const archiveBtn = document.createElement("button");
   archiveBtn.className = "skills-add-btn";
   archiveBtn.innerHTML = `${ARCHIVE_SVG} From Archive`;
   archiveBtn.addEventListener("click", () => showAddFromArchive());
 
   addBtns.appendChild(dirBtn);
+  addBtns.appendChild(ghBtn);
   addBtns.appendChild(archiveBtn);
   addSection.appendChild(addHeader);
   addSection.appendChild(addBtns);
@@ -146,6 +153,79 @@ function showAddFromDirectory() {
     try {
       const res = await ctx.api.installSkillFromPath({
         sourcePath,
+        scope: scopeSelect.value,
+        projectPath: getProjectPath(),
+      });
+      if (res.error) { errEl.textContent = res.error; okBtn.disabled = false; okBtn.textContent = "Add Skill"; return; }
+      showSkillToast(`Added "${res.name}"`, "success");
+      close();
+      refreshInstalled();
+      refreshProjectCommands();
+    } catch (err) {
+      errEl.textContent = err.message || "Failed to add skill";
+      okBtn.disabled = false;
+      okBtn.textContent = "Add Skill";
+    }
+  });
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") okBtn.click();
+    if (e.key === "Escape") close();
+  });
+
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+  input.focus();
+}
+
+// ── Add from GitHub ─────────────────────────────────────
+
+function showAddFromGitHub() {
+  const overlay = document.createElement("div");
+  overlay.className = "skills-modal-overlay";
+
+  const dialog = document.createElement("div");
+  dialog.className = "skills-modal";
+  dialog.innerHTML = `
+    <div class="skills-modal-title">Add Skill from GitHub</div>
+    <div class="skills-modal-desc">Enter a GitHub repository URL pointing to a directory containing a SKILL.md file.</div>
+    <input class="skills-modal-input" type="text" placeholder="https://github.com/owner/repo/tree/main/path/to/skill" autocomplete="off">
+    <div class="skills-modal-hint">Supports: github.com/owner/repo/tree/branch/path or raw.githubusercontent.com URLs</div>
+    <div class="skills-modal-scope-row">
+      <label>Install to:</label>
+      <select class="skills-modal-scope">
+        <option value="project" ${defaultScope === "project" ? "selected" : ""}>Project (.claude/skills/)</option>
+        <option value="global" ${defaultScope === "global" ? "selected" : ""}>Global (~/.claude/skills/)</option>
+      </select>
+    </div>
+    <div class="skills-modal-actions">
+      <button class="skills-modal-cancel">Cancel</button>
+      <button class="skills-modal-ok">Add Skill</button>
+    </div>
+    <div class="skills-modal-error"></div>
+  `;
+
+  const input = dialog.querySelector(".skills-modal-input");
+  const scopeSelect = dialog.querySelector(".skills-modal-scope");
+  const okBtn = dialog.querySelector(".skills-modal-ok");
+  const cancelBtn = dialog.querySelector(".skills-modal-cancel");
+  const errEl = dialog.querySelector(".skills-modal-error");
+
+  const close = () => overlay.remove();
+
+  cancelBtn.addEventListener("click", close);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+
+  okBtn.addEventListener("click", async () => {
+    const githubUrl = input.value.trim();
+    if (!githubUrl) { errEl.textContent = "Please enter a GitHub URL"; return; }
+    okBtn.disabled = true;
+    okBtn.textContent = "Cloning...";
+    errEl.textContent = "";
+
+    try {
+      const res = await ctx.api.installSkillFromGitHub({
+        githubUrl,
         scope: scopeSelect.value,
         projectPath: getProjectPath(),
       });

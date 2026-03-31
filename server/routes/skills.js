@@ -1,4 +1,4 @@
-// Skills — local skill management (install from directory or archive)
+// Skills — local skill management (install from directory, GitHub, or archive)
 import { Router } from "express";
 import { readFile, readdir, stat, mkdir, rm, rename, copyFile } from "fs/promises";
 import { join, basename, extname } from "path";
@@ -93,6 +93,24 @@ async function findSkillMd(dir) {
   return null;
 }
 
+function parseGithubUrl(url) {
+  const treeMatch = url.match(/github\.com\/([^/]+)\/([^/]+)\/tree\/([^/]+)\/(.+)/);
+  if (treeMatch) {
+    return { owner: treeMatch[1], repo: treeMatch[2], branch: treeMatch[3], path: treeMatch[4] };
+  }
+  const blobMatch = url.match(/github\.com\/([^/]+)\/([^/]+)\/blob\/([^/]+)\/(.+)/);
+  if (blobMatch) {
+    const dir = blobMatch[4].replace(/\/[^/]+$/, "");
+    return { owner: blobMatch[1], repo: blobMatch[2], branch: blobMatch[3], path: dir };
+  }
+  const rawMatch = url.match(/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/([^/]+)\/(.+)/);
+  if (rawMatch) {
+    const dir = rawMatch[4].replace(/\/[^/]+$/, "");
+    return { owner: rawMatch[1], repo: rawMatch[2], branch: rawMatch[3], path: dir };
+  }
+  return null;
+}
+
 // ── Installed skills ────────────────────────────────────
 
 router.get("/installed", async (req, res) => {
@@ -164,6 +182,72 @@ router.post("/install-from-path", async (req, res) => {
   }
 });
 
+// ── Install from GitHub ─────────────────────────────────
+
+router.post("/install-from-github", async (req, res) => {
+  try {
+    const { githubUrl, scope, projectPath } = req.body;
+
+    if (!githubUrl || typeof githubUrl !== "string") {
+      return res.status(400).json({ error: "githubUrl is required" });
+    }
+
+    if (!projectPath && scope === "project") {
+      return res.status(400).json({ error: "projectPath required for project scope" });
+    }
+
+    const parsed = parseGithubUrl(githubUrl);
+    if (!parsed) {
+      return res.status(400).json({ error: "Could not parse GitHub URL. Use a github.com/owner/repo/tree/branch/path URL." });
+    }
+
+    const tmpDir = join(homedir(), ".claudeck", "tmp-skills");
+    await mkdir(tmpDir, { recursive: true });
+    const cloneDir = join(tmpDir, `gh-${Date.now()}`);
+
+    const repoUrl = `https://github.com/${parsed.owner}/${parsed.repo}.git`;
+    await execAsync(`git clone --depth 1 --branch ${parsed.branch} --filter=blob:none --sparse "${repoUrl}" "${cloneDir}"`);
+    await execAsync(`git -C "${cloneDir}" sparse-checkout set "${parsed.path}"`);
+
+    const skillSource = join(cloneDir, parsed.path);
+    if (!existsSync(skillSource)) {
+      await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      return res.status(404).json({ error: "Skill directory not found in repository" });
+    }
+
+    const hasSkill = existsSync(join(skillSource, "SKILL.md")) ||
+                     existsSync(join(skillSource, "SKILL.md.disabled"));
+    if (!hasSkill) {
+      await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      return res.status(400).json({ error: "No SKILL.md found in the specified path" });
+    }
+
+    const dirName = normalizeName(basename(parsed.path));
+    const targetBase = scope === "global"
+      ? join(homedir(), ".claude", "skills")
+      : join(projectPath, ".claude", "skills");
+    const targetDir = join(targetBase, dirName);
+    await mkdir(targetDir, { recursive: true });
+
+    const entries = await readdir(skillSource);
+    let filesCount = 0;
+    for (const entry of entries) {
+      const src = join(skillSource, entry);
+      const entryStat = await stat(src);
+      if (entryStat.isFile()) {
+        const normalized = entry.toUpperCase() === "SKILL.MD" ? "SKILL.md" : entry;
+        await copyFile(src, join(targetDir, normalized));
+        filesCount++;
+      }
+    }
+
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    res.json({ success: true, path: targetDir, filesCount, name: dirName });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Install from archive (zip/tar.gz) ───────────────────
 
 router.post("/install-from-archive", async (req, res) => {
@@ -199,23 +283,23 @@ router.post("/install-from-archive", async (req, res) => {
       await execAsync(`tar xzf "${tmpFile}" -C "${extractDir}"`);
     }
 
-    const skillDir = await findSkillMd(extractDir);
-    if (!skillDir) {
+    const foundDir = await findSkillMd(extractDir);
+    if (!foundDir) {
       await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
       return res.status(400).json({ error: "No SKILL.md found in archive" });
     }
 
-    const dirName = normalizeName(basename(skillDir));
+    const dirName = normalizeName(basename(foundDir));
     const targetBase = scope === "global"
       ? join(homedir(), ".claude", "skills")
       : join(projectPath, ".claude", "skills");
     const targetDir = join(targetBase, dirName);
     await mkdir(targetDir, { recursive: true });
 
-    const entries = await readdir(skillDir);
+    const entries = await readdir(foundDir);
     let filesCount = 0;
     for (const entry of entries) {
-      const src = join(skillDir, entry);
+      const src = join(foundDir, entry);
       const entryStat = await stat(src);
       if (entryStat.isFile()) {
         const normalized = entry.toUpperCase() === "SKILL.MD" ? "SKILL.md" : entry;
@@ -287,4 +371,5 @@ router.put("/:name/toggle", async (req, res) => {
   }
 });
 
+export { parseGithubUrl };
 export default router;

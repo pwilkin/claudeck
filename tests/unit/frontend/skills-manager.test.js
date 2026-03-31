@@ -108,9 +108,10 @@ describe("skills-manager", () => {
       expect(el.querySelector(".skills-add-btns")).not.toBeNull();
 
       const btns = el.querySelectorAll(".skills-add-btn");
-      expect(btns.length).toBe(2);
+      expect(btns.length).toBe(3);
       expect(btns[0].textContent).toContain("From Directory");
-      expect(btns[1].textContent).toContain("From Archive");
+      expect(btns[1].textContent).toContain("From GitHub");
+      expect(btns[2].textContent).toContain("From Archive");
     });
 
     it("shows installed skills header", async () => {
