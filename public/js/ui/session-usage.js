@@ -1,7 +1,6 @@
 // Claude Code 5-hour session usage indicator (status bar)
 import { $ } from '../core/dom.js';
 
-const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
 const REFRESH_INTERVAL_MS = 30_000;
 
 let lastInfo = null;
@@ -20,16 +19,8 @@ function renderSessionUsage(info) {
 
   const { status, utilization, resetsAt, rateLimitType } = info;
 
-  let pct;
-  if (utilization != null) {
-    pct = Math.min(utilization * 100, 100);
-  } else if (resetsAt) {
-    const windowStartMs = resetsAt * 1000 - FIVE_HOURS_MS;
-    const elapsed = Date.now() - windowStartMs;
-    pct = Math.min((elapsed / FIVE_HOURS_MS) * 100, 100);
-  } else {
-    return;
-  }
+  if (utilization == null) return;
+  const pct = Math.min(utilization * 100, 100);
 
   const isWarning = status === 'allowed_warning' || pct >= 75;
   const isCritical = status === 'rejected' || pct >= 90;
