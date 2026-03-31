@@ -1,6 +1,6 @@
 {
   "name": "claudeck",
-  "version": "1.3.1",
+  "version": "1.4.0-pw",
   "type": "module",
   "description": "A browser-based UI for Claude Code — chat, run workflows, manage MCP servers, track costs, and orchestrate autonomous agents from a local web interface. Installable as a PWA.",
   "main": "server.js",
@@ -31,13 +31,13 @@
     "pwa",
     "developer-tools"
   ],
-  "homepage": "https://github.com/hamedafarag/claudeck",
+  "homepage": "https://github.com/pwilkin/claudeck",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hamedafarag/claudeck"
+    "url": "https://github.com/pwilkin/claudeck"
   },
   "license": "MIT",
-  "author": "Hamed Farag",
+  "author": "Hamed Farag, Piotr Wilkin",
   "engines": {
     "node": ">=18.0.0"
   },
