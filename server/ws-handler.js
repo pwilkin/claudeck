@@ -223,6 +223,16 @@ export async function processSdkStream(q, { ws, wsSend, sessionIds, clientSid, c
           if (resolvedSid) {
             addMessage(resolvedSid, "assistant", JSON.stringify({ text: block.text }), chatId || null, wfMeta);
           }
+        } else if (block.type === "thinking") {
+          wsSend({ type: "thinking", thinking: block.thinking || "", redacted: false });
+          if (resolvedSid) {
+            addMessage(resolvedSid, "thinking", JSON.stringify({ thinking: block.thinking || "", redacted: false }), chatId || null, wfMeta);
+          }
+        } else if (block.type === "redacted_thinking") {
+          wsSend({ type: "thinking", thinking: "", redacted: true });
+          if (resolvedSid) {
+            addMessage(resolvedSid, "thinking", JSON.stringify({ thinking: "", redacted: true }), chatId || null, wfMeta);
+          }
         } else if (block.type === "tool_use") {
           wsSend({ type: "tool", id: block.id, name: block.name, input: block.input });
           if (resolvedSid) {
@@ -926,6 +936,12 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
           turnState.lastAssistantText += (turnState.lastAssistantText ? "\n\n" : "") + block.text;
           wsSend({ type: "text", text: block.text });
           if (turnState.resolvedSid) addMessage(turnState.resolvedSid, "assistant", JSON.stringify({ text: block.text }), chatId || null);
+        } else if (block.type === "thinking") {
+          wsSend({ type: "thinking", thinking: block.thinking || "", redacted: false });
+          if (turnState.resolvedSid) addMessage(turnState.resolvedSid, "thinking", JSON.stringify({ thinking: block.thinking || "", redacted: false }), chatId || null);
+        } else if (block.type === "redacted_thinking") {
+          wsSend({ type: "thinking", thinking: "", redacted: true });
+          if (turnState.resolvedSid) addMessage(turnState.resolvedSid, "thinking", JSON.stringify({ thinking: "", redacted: true }), chatId || null);
         } else if (block.type === "tool_use") {
           wsSend({ type: "tool", id: block.id, name: block.name, input: block.input });
           if (turnState.resolvedSid) addMessage(turnState.resolvedSid, "tool", JSON.stringify({ id: block.id, name: block.name, input: block.input }), chatId || null);
