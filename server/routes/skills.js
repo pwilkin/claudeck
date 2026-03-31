@@ -1,352 +1,253 @@
-// Skills Marketplace — SkillsMP integration routes
+// Skills — local skill management (install from directory or archive)
 import { Router } from "express";
-import { configPath } from "../paths.js";
-import { readFile, writeFile, readdir, stat, mkdir, rm, rename } from "fs/promises";
-import { join } from "path";
+import { readFile, readdir, stat, mkdir, rm, rename, copyFile } from "fs/promises";
+import { join, basename, extname } from "path";
 import { homedir } from "os";
-import { existsSync } from "fs";
+import { existsSync, createWriteStream } from "fs";
+import { pipeline } from "stream/promises";
+import { Readable } from "stream";
+import { exec } from "child_process";
+import { promisify } from "util";
 
+const execAsync = promisify(exec);
 const router = Router();
-
-const SKILLSMP_BASE = "https://skillsmp.com/api/v1";
-const KEY_PREFIX = "sk_live_skillsmp_";
 
 // ── Helpers ─────────────────────────────────────────────
 
-async function readSkillsConfig() {
-  try {
-    const raw = await readFile(configPath("skillsmp-config.json"), "utf-8");
-    return JSON.parse(raw);
-  } catch {
-    return { apiKey: "", defaultScope: "project", searchMode: "keyword" };
+function skillDirs(projectPath) {
+  const dirs = [join(homedir(), ".claude", "skills")];
+  if (projectPath) {
+    dirs.push(join(projectPath, ".claude", "skills"));
   }
+  return dirs;
 }
 
-async function writeSkillsConfig(config) {
-  await writeFile(configPath("skillsmp-config.json"), JSON.stringify(config, null, 2));
-}
-
-function isActivated(config) {
-  return typeof config.apiKey === "string" && config.apiKey.startsWith(KEY_PREFIX);
-}
-
-function maskKey(key) {
-  if (!key || !key.startsWith(KEY_PREFIX)) return "";
-  return KEY_PREFIX + "..." + key.slice(-4);
-}
-
-// ── Middleware: require valid API key ────────────────────
-
-async function requireApiKey(req, res, next) {
-  const config = await readSkillsConfig();
-  if (!isActivated(config)) {
-    return res.status(403).json({
-      error: "Skills Marketplace not activated. Add your API key to get started.",
-      code: "NO_API_KEY",
-    });
-  }
-  req.skillsConfig = config;
-  next();
-}
-
-// ── Config endpoints (always accessible) ────────────────
-
-router.get("/config", async (_req, res) => {
+async function scanSkills(baseDir, scope) {
+  const skills = [];
   try {
-    const config = await readSkillsConfig();
-    res.json({
-      activated: isActivated(config),
-      apiKey: maskKey(config.apiKey),
-      defaultScope: config.defaultScope || "project",
-      searchMode: config.searchMode || "keyword",
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.put("/config", async (req, res) => {
-  try {
-    const { apiKey, defaultScope, searchMode } = req.body;
-    const config = await readSkillsConfig();
-
-    // Update non-key fields if provided
-    if (defaultScope) config.defaultScope = defaultScope;
-    if (searchMode) config.searchMode = searchMode;
-
-    // Handle API key change
-    if (apiKey !== undefined) {
-      if (apiKey === "") {
-        // Deactivate
-        config.apiKey = "";
-        await writeSkillsConfig(config);
-        return res.json({ success: true, activated: false });
-      }
-
-      // Validate format
-      if (!apiKey.startsWith(KEY_PREFIX)) {
-        return res.status(400).json({
-          error: "Invalid API key format. Key must start with 'sk_live_skillsmp_'",
-          code: "INVALID_KEY",
-        });
-      }
-
-      // Test the key with a lightweight call
+    const entries = await readdir(baseDir);
+    for (const entry of entries) {
       try {
-        const testRes = await fetch(
-          `${SKILLSMP_BASE}/skills/search?q=test&limit=1`,
-          { headers: { Authorization: `Bearer ${apiKey}` } }
-        );
-        if (!testRes.ok) {
-          const body = await testRes.json().catch(() => ({}));
-          if (testRes.status === 401 || body?.error?.code === "INVALID_API_KEY") {
-            return res.status(400).json({ error: "Invalid API key", code: "INVALID_KEY" });
-          }
-          return res.status(400).json({
-            error: body?.error?.message || "API key validation failed",
-            code: "VALIDATION_FAILED",
-          });
+        const entryPath = join(baseDir, entry);
+        const s = await stat(entryPath);
+        if (!s.isDirectory()) continue;
+
+        const enabledPath = join(entryPath, "SKILL.md");
+        const disabledPath = join(entryPath, "SKILL.md.disabled");
+        let skillFile = null;
+        let enabled = true;
+
+        if (existsSync(enabledPath)) {
+          skillFile = enabledPath;
+        } else if (existsSync(disabledPath)) {
+          skillFile = disabledPath;
+          enabled = false;
+        } else {
+          continue;
         }
-      } catch (fetchErr) {
-        return res.status(400).json({
-          error: "Could not reach SkillsMP to validate key: " + fetchErr.message,
-          code: "NETWORK_ERROR",
-        });
-      }
 
-      config.apiKey = apiKey;
+        const content = await readFile(skillFile, "utf-8");
+        let name = entry;
+        let description = "";
+        let argumentHint = "";
+
+        const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+        if (fmMatch) {
+          const fm = fmMatch[1];
+          const nameMatch = fm.match(/^name:\s*(.+)$/m);
+          const descMatch = fm.match(/^description:\s*(.+)$/m);
+          const argMatch = fm.match(/^argument-hint:\s*(.+)$/m);
+          if (nameMatch) name = nameMatch[1].trim();
+          if (descMatch) description = descMatch[1].trim();
+          if (argMatch) argumentHint = argMatch[1].trim();
+        }
+
+        skills.push({ name, dirName: entry, description, argumentHint, scope, enabled, path: entryPath });
+      } catch { /* skip unreadable */ }
     }
-
-    await writeSkillsConfig(config);
-    res.json({ success: true, activated: isActivated(config) });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ── Search endpoints (gated) ────────────────────────────
-
-router.get("/search", requireApiKey, async (req, res) => {
-  try {
-    const { q, page, limit, sortBy } = req.query;
-    if (!q) return res.status(400).json({ error: "Search query (q) is required" });
-
-    const params = new URLSearchParams({ q });
-    if (page) params.set("page", page);
-    if (limit) params.set("limit", limit);
-    if (sortBy) params.set("sortBy", sortBy);
-
-    const apiRes = await fetch(`${SKILLSMP_BASE}/skills/search?${params}`, {
-      headers: { Authorization: `Bearer ${req.skillsConfig.apiKey}` },
-    });
-
-    const body = await apiRes.json();
-
-    // Forward rate limit headers
-    const remaining = apiRes.headers.get("X-RateLimit-Daily-Remaining");
-    const dailyLimit = apiRes.headers.get("X-RateLimit-Daily-Limit");
-    if (remaining) res.set("X-RateLimit-Daily-Remaining", remaining);
-    if (dailyLimit) res.set("X-RateLimit-Daily-Limit", dailyLimit);
-
-    res.status(apiRes.status).json(body);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.get("/ai-search", requireApiKey, async (req, res) => {
-  try {
-    const { q } = req.query;
-    if (!q) return res.status(400).json({ error: "Search query (q) is required" });
-
-    const apiRes = await fetch(`${SKILLSMP_BASE}/skills/ai-search?q=${encodeURIComponent(q)}`, {
-      headers: { Authorization: `Bearer ${req.skillsConfig.apiKey}` },
-    });
-
-    const body = await apiRes.json();
-
-    const remaining = apiRes.headers.get("X-RateLimit-Daily-Remaining");
-    const dailyLimit = apiRes.headers.get("X-RateLimit-Daily-Limit");
-    if (remaining) res.set("X-RateLimit-Daily-Remaining", remaining);
-    if (dailyLimit) res.set("X-RateLimit-Daily-Limit", dailyLimit);
-
-    res.status(apiRes.status).json(body);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ── GitHub URL parsing ──────────────────────────────────
-
-export function parseGithubUrl(githubUrl) {
-  // https://github.com/owner/repo/tree/branch/path/to/skill
-  const match = githubUrl.match(
-    /github\.com\/([^/]+)\/([^/]+)\/tree\/([^/]+)\/(.+)/
-  );
-  if (!match) return null;
-  return { owner: match[1], repo: match[2], branch: match[3], path: match[4] };
+  } catch { /* directory doesn't exist */ }
+  return skills;
 }
 
-function buildRawUrl(owner, repo, branch, path, filename) {
-  return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}/${filename}`;
-}
-
-async function fetchSkillFiles(owner, repo, branch, skillPath) {
-  const url = `https://api.github.com/repos/${owner}/${repo}/contents/${skillPath}?ref=${branch}`;
-  const res = await fetch(url, {
-    headers: { Accept: "application/vnd.github.v3+json" },
-  });
-  if (!res.ok) {
-    if (res.status === 403) throw new Error("GitHub API rate limit exceeded");
-    throw new Error(`GitHub API error: ${res.status}`);
-  }
-  const items = await res.json();
-  if (!Array.isArray(items)) return [];
-  return items
-    .filter((i) => i.type === "file")
-    .map((i) => ({ name: i.name, download_url: i.download_url, type: i.type }));
-}
-
-// ── Install endpoint (gated) ────────────────────────────
-
-const VALID_NAME = /^[a-z0-9][a-z0-9-]*$/;
-
-// Normalize a skill name to a valid directory name: lowercase, alphanumeric + hyphens
 function normalizeName(name) {
   return name
     .toLowerCase()
-    .replace(/[_\s]+/g, "-")     // underscores/spaces → hyphens
-    .replace(/[^a-z0-9-]/g, "")  // strip invalid chars
-    .replace(/^-+|-+$/g, "")     // trim leading/trailing hyphens
+    .replace(/[_\s]+/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/^-+|-+$/g, "")
     || "skill";
 }
 
-// Ensure SKILL.md has frontmatter with name/description (inject if missing)
-function ensureFrontmatter(content, name, description) {
-  const hasFm = /^---\n[\s\S]*?\n---/.test(content);
-  if (hasFm) {
-    // Check if description is missing in existing frontmatter
-    const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
-    if (fmMatch && description) {
-      const fm = fmMatch[1];
-      if (!fm.match(/^description:/m)) {
-        // Add description to existing frontmatter
-        const newFm = fm.trimEnd() + `\ndescription: ${description}`;
-        return content.replace(/^---\n[\s\S]*?\n---/, `---\n${newFm}\n---`);
-      }
+async function findSkillMd(dir) {
+  const entries = await readdir(dir);
+  for (const entry of entries) {
+    const fullPath = join(dir, entry);
+    const entryStat = await stat(fullPath);
+    if (entryStat.isDirectory()) {
+      const result = await findSkillMd(fullPath);
+      if (result) return result;
+    } else if (entry.toUpperCase() === "SKILL.MD" || entry === "SKILL.md") {
+      return dir;
     }
-    return content;
   }
-  // No frontmatter — inject one
-  const lines = [`name: ${name}`];
-  if (description) lines.push(`description: ${description}`);
-  return `---\n${lines.join("\n")}\n---\n\n${content}`;
+  return null;
 }
 
-router.post("/install", requireApiKey, async (req, res) => {
+// ── Installed skills ────────────────────────────────────
+
+router.get("/installed", async (req, res) => {
   try {
-    const { githubUrl, name, scope, projectPath, description } = req.body;
-
-    // Normalize name to valid directory format
-    const dirName = normalizeName(name);
-    if (!dirName) {
-      return res.status(400).json({ error: "Invalid skill name." });
+    const { projectPath } = req.query;
+    const skills = [];
+    for (const dir of skillDirs(projectPath)) {
+      const scope = dir === join(homedir(), ".claude", "skills") ? "global" : "project";
+      skills.push(...await scanSkills(dir, scope));
     }
-
-    // Validate scope
-    if (!["global", "project"].includes(scope)) {
-      return res.status(400).json({ error: "Scope must be 'global' or 'project'" });
-    }
-
-    // Validate projectPath for project scope
-    if (scope === "project") {
-      if (!projectPath || !projectPath.startsWith("/") || projectPath.includes("..")) {
-        return res.status(400).json({ error: "Invalid project path" });
-      }
-    }
-
-    // Parse GitHub URL
-    const parsed = parseGithubUrl(githubUrl);
-    if (!parsed) {
-      return res.status(400).json({ error: "Could not parse GitHub URL" });
-    }
-
-    // Determine target directory
-    const targetDir =
-      scope === "global"
-        ? join(homedir(), ".claude", "skills", dirName)
-        : join(projectPath, ".claude", "skills", dirName);
-
-    // Create directory
-    await mkdir(targetDir, { recursive: true });
-
-    let filesCount = 0;
-
-    // Try fetching all files from GitHub API first
-    try {
-      const files = await fetchSkillFiles(parsed.owner, parsed.repo, parsed.branch, parsed.path);
-      for (const file of files) {
-        if (!file.download_url) continue;
-        const fileRes = await fetch(file.download_url);
-        if (!fileRes.ok) continue;
-        let content = await fileRes.text();
-        // Normalize SKILL.md filename variations
-        const isSkillMd = file.name.toUpperCase() === "SKILL.MD";
-        const fileName = isSkillMd ? "SKILL.md" : file.name;
-        // Ensure SKILL.md has frontmatter with description
-        if (isSkillMd) {
-          content = ensureFrontmatter(content, name, description);
-        }
-        await writeFile(join(targetDir, fileName), content);
-        filesCount++;
-      }
-    } catch {
-      // Fallback: just fetch SKILL.md directly via raw URL
-      const rawUrl = buildRawUrl(parsed.owner, parsed.repo, parsed.branch, parsed.path, "SKILL.md");
-      const fileRes = await fetch(rawUrl);
-      if (!fileRes.ok) {
-        // Try skill.md (lowercase)
-        const altUrl = buildRawUrl(parsed.owner, parsed.repo, parsed.branch, parsed.path, "skill.md");
-        const altRes = await fetch(altUrl);
-        if (!altRes.ok) {
-          return res.status(404).json({ error: "Could not find SKILL.md in the repository" });
-        }
-        const content = ensureFrontmatter(await altRes.text(), name, description);
-        await writeFile(join(targetDir, "SKILL.md"), content);
-      } else {
-        const content = ensureFrontmatter(await fileRes.text(), name, description);
-        await writeFile(join(targetDir, "SKILL.md"), content);
-      }
-      filesCount = 1;
-    }
-
-    res.json({ success: true, path: targetDir, filesCount });
+    res.json(skills);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── Uninstall endpoint (gated) ──────────────────────────
+// ── Install from local directory path ───────────────────
 
-router.delete("/:name", requireApiKey, async (req, res) => {
+router.post("/install-from-path", async (req, res) => {
+  try {
+    const { sourcePath, scope, projectPath } = req.body;
+
+    if (!sourcePath || typeof sourcePath !== "string") {
+      return res.status(400).json({ error: "sourcePath is required" });
+    }
+
+    if (!existsSync(sourcePath)) {
+      return res.status(400).json({ error: "Source path does not exist" });
+    }
+
+    const s = await stat(sourcePath);
+    if (!s.isDirectory()) {
+      return res.status(400).json({ error: "Source path must be a directory" });
+    }
+
+    const hasSkill = existsSync(join(sourcePath, "SKILL.md")) ||
+                     existsSync(join(sourcePath, "SKILL.md.disabled"));
+    if (!hasSkill) {
+      return res.status(400).json({ error: "No SKILL.md found in directory" });
+    }
+
+    const dirName = normalizeName(basename(sourcePath));
+    const targetBase = scope === "global"
+      ? join(homedir(), ".claude", "skills")
+      : join(projectPath, ".claude", "skills");
+
+    if (!projectPath && scope === "project") {
+      return res.status(400).json({ error: "projectPath required for project scope" });
+    }
+
+    const targetDir = join(targetBase, dirName);
+    await mkdir(targetDir, { recursive: true });
+
+    const entries = await readdir(sourcePath);
+    let filesCount = 0;
+    for (const entry of entries) {
+      const src = join(sourcePath, entry);
+      const entryStat = await stat(src);
+      if (entryStat.isFile()) {
+        const normalized = entry.toUpperCase() === "SKILL.MD" ? "SKILL.md" : entry;
+        await copyFile(src, join(targetDir, normalized));
+        filesCount++;
+      }
+    }
+
+    res.json({ success: true, path: targetDir, filesCount, name: dirName });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Install from archive (zip/tar.gz) ───────────────────
+
+router.post("/install-from-archive", async (req, res) => {
+  try {
+    const { scope, projectPath, fileName } = req.body;
+
+    if (!projectPath && scope === "project") {
+      return res.status(400).json({ error: "projectPath required for project scope" });
+    }
+
+    const archiveData = req.body.data;
+    if (!archiveData) {
+      return res.status(400).json({ error: "Archive data is required" });
+    }
+
+    const ext = extname(fileName || "").toLowerCase();
+    if (ext !== ".zip" && ext !== ".gz" && ext !== ".tgz") {
+      return res.status(400).json({ error: "Unsupported archive format. Use .zip or .tar.gz" });
+    }
+
+    const tmpDir = join(homedir(), ".claudeck", "tmp-skills");
+    await mkdir(tmpDir, { recursive: true });
+    const tmpFile = join(tmpDir, `upload-${Date.now()}${ext}`);
+    const tmpOut = createWriteStream(tmpFile);
+    await pipeline(Readable.from(Buffer.from(archiveData, "base64")), tmpOut);
+
+    const extractDir = join(tmpDir, `extract-${Date.now()}`);
+    await mkdir(extractDir, { recursive: true });
+
+    if (ext === ".zip") {
+      await execAsync(`unzip -o "${tmpFile}" -d "${extractDir}"`);
+    } else {
+      await execAsync(`tar xzf "${tmpFile}" -C "${extractDir}"`);
+    }
+
+    const skillDir = await findSkillMd(extractDir);
+    if (!skillDir) {
+      await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      return res.status(400).json({ error: "No SKILL.md found in archive" });
+    }
+
+    const dirName = normalizeName(basename(skillDir));
+    const targetBase = scope === "global"
+      ? join(homedir(), ".claude", "skills")
+      : join(projectPath, ".claude", "skills");
+    const targetDir = join(targetBase, dirName);
+    await mkdir(targetDir, { recursive: true });
+
+    const entries = await readdir(skillDir);
+    let filesCount = 0;
+    for (const entry of entries) {
+      const src = join(skillDir, entry);
+      const entryStat = await stat(src);
+      if (entryStat.isFile()) {
+        const normalized = entry.toUpperCase() === "SKILL.MD" ? "SKILL.md" : entry;
+        await copyFile(src, join(targetDir, normalized));
+        filesCount++;
+      }
+    }
+
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    res.json({ success: true, path: targetDir, filesCount, name: dirName });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Uninstall ───────────────────────────────────────────
+
+router.delete("/:name", async (req, res) => {
   try {
     const { name } = req.params;
     const { scope, projectPath } = req.query;
 
-    if (!VALID_NAME.test(name)) {
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) {
       return res.status(400).json({ error: "Invalid skill name" });
     }
 
-    const skillDir =
-      scope === "global"
-        ? join(homedir(), ".claude", "skills", name)
-        : join(projectPath, ".claude", "skills", name);
+    const skillDir = scope === "global"
+      ? join(homedir(), ".claude", "skills", name)
+      : join(projectPath, ".claude", "skills", name);
 
-    // Safety check: verify it's a skill directory
-    const hasSkill =
-      existsSync(join(skillDir, "SKILL.md")) ||
-      existsSync(join(skillDir, "SKILL.md.disabled"));
-
+    const hasSkill = existsSync(join(skillDir, "SKILL.md")) ||
+                     existsSync(join(skillDir, "SKILL.md.disabled"));
     if (!hasSkill) {
       return res.status(404).json({ error: "Skill not found" });
     }
@@ -358,17 +259,16 @@ router.delete("/:name", requireApiKey, async (req, res) => {
   }
 });
 
-// ── Toggle endpoint (gated) ────────────────────────────
+// ── Toggle ──────────────────────────────────────────────
 
-router.put("/:name/toggle", requireApiKey, async (req, res) => {
+router.put("/:name/toggle", async (req, res) => {
   try {
     const { name } = req.params;
     const { scope, projectPath } = req.query;
 
-    const skillDir =
-      scope === "global"
-        ? join(homedir(), ".claude", "skills", name)
-        : join(projectPath, ".claude", "skills", name);
+    const skillDir = scope === "global"
+      ? join(homedir(), ".claude", "skills", name)
+      : join(projectPath, ".claude", "skills", name);
 
     const enabledPath = join(skillDir, "SKILL.md");
     const disabledPath = join(skillDir, "SKILL.md.disabled");
@@ -382,70 +282,6 @@ router.put("/:name/toggle", requireApiKey, async (req, res) => {
     } else {
       res.status(404).json({ error: "Skill not found" });
     }
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ── Installed skills list (gated) ───────────────────────
-
-router.get("/installed", requireApiKey, async (req, res) => {
-  try {
-    const { projectPath } = req.query;
-    const skills = [];
-
-    async function scanDir(baseDir, scope) {
-      try {
-        const entries = await readdir(baseDir);
-        for (const entry of entries) {
-          try {
-            const entryPath = join(baseDir, entry);
-            const s = await stat(entryPath);
-            if (!s.isDirectory()) continue;
-
-            const enabledPath = join(entryPath, "SKILL.md");
-            const disabledPath = join(entryPath, "SKILL.md.disabled");
-            let skillFile = null;
-            let enabled = true;
-
-            if (existsSync(enabledPath)) {
-              skillFile = enabledPath;
-            } else if (existsSync(disabledPath)) {
-              skillFile = disabledPath;
-              enabled = false;
-            } else {
-              continue;
-            }
-
-            const content = await readFile(skillFile, "utf-8");
-            let name = entry;
-            let description = "";
-
-            // Parse YAML frontmatter
-            const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
-            if (fmMatch) {
-              const fm = fmMatch[1];
-              const nameMatch = fm.match(/^name:\s*(.+)$/m);
-              const descMatch = fm.match(/^description:\s*(.+)$/m);
-              if (nameMatch) name = nameMatch[1].trim();
-              if (descMatch) description = descMatch[1].trim();
-            }
-
-            skills.push({ name, dirName: entry, description, scope, enabled, path: entryPath });
-          } catch { /* skip unreadable */ }
-        }
-      } catch { /* directory doesn't exist */ }
-    }
-
-    // Scan global skills
-    await scanDir(join(homedir(), ".claude", "skills"), "global");
-
-    // Scan project skills
-    if (projectPath) {
-      await scanDir(join(projectPath, ".claude", "skills"), "project");
-    }
-
-    res.json(skills);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

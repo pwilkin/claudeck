@@ -636,35 +636,7 @@ export async function deleteRepoGroup(id) {
   return res.json();
 }
 
-// ── Skills Marketplace (SkillsMP) ───────────────────────
-
-export async function fetchSkillsConfig() {
-  const res = await fetch("/api/skills/config");
-  return res.json();
-}
-
-export async function saveSkillsConfig(config) {
-  const res = await fetch("/api/skills/config", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(config),
-  });
-  return res.json();
-}
-
-export async function searchSkills(q, page, limit, sortBy) {
-  let url = `/api/skills/search?q=${encodeURIComponent(q)}`;
-  if (page) url += `&page=${page}`;
-  if (limit) url += `&limit=${limit}`;
-  if (sortBy) url += `&sortBy=${encodeURIComponent(sortBy)}`;
-  const res = await fetch(url);
-  return { data: await res.json(), headers: res.headers };
-}
-
-export async function aiSearchSkills(q) {
-  const res = await fetch(`/api/skills/ai-search?q=${encodeURIComponent(q)}`);
-  return { data: await res.json(), headers: res.headers };
-}
+// ── Skills ──────────────────────────────────────────────
 
 export async function fetchInstalledSkills(projectPath) {
   let url = "/api/skills/installed";
@@ -673,11 +645,26 @@ export async function fetchInstalledSkills(projectPath) {
   return res.json();
 }
 
-export async function installSkill(body) {
-  const res = await fetch("/api/skills/install", {
+export async function installSkillFromPath(body) {
+  const res = await fetch("/api/skills/install-from-path", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+  });
+  return res.json();
+}
+
+export async function installSkillFromArchive({ file, scope, projectPath }) {
+  const data = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(",")[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+  const res = await fetch("/api/skills/install-from-archive", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ data, fileName: file.name, scope, projectPath }),
   });
   return res.json();
 }

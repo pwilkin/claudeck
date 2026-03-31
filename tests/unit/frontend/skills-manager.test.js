@@ -22,52 +22,18 @@ vi.mock("../../../public/js/ui/right-panel.js", () => ({
   openRightPanel: vi.fn(),
 }));
 
-// ── Mock utils ──────────────────────────────────────────────────────────────
+// ── Mock projects ───────────────────────────────────────────────────────────
 
-vi.mock("../../../public/js/core/utils.js", () => ({
-  escapeHtml: (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"),
-  getToolDetail: vi.fn(),
-  scrollToBottom: vi.fn(),
-}));
-
-vi.mock("../../../public/js/ui/formatting.js", () => ({
-  renderMarkdown: (s) => s,
-  highlightCodeBlocks: vi.fn(),
-  addCopyButtons: vi.fn(),
-  renderMermaidBlocks: vi.fn(),
-}));
-
-vi.mock("../../../public/js/ui/diff.js", () => ({
-  renderDiffView: vi.fn(),
-  renderAdditionsView: vi.fn(),
-}));
-
-vi.mock("../../../public/js/core/store.js", () => ({
-  getState: vi.fn(),
-  setState: vi.fn(),
-  on: vi.fn(),
-}));
-
-vi.mock("../../../public/js/core/dom.js", () => ({
-  $: { messagesDiv: document.createElement("div") },
-}));
-
-vi.mock("../../../public/js/ui/parallel.js", () => ({
-  getPane: () => ({
-    messagesDiv: document.createElement("div"),
-    currentAssistantMsg: null,
-  }),
+vi.mock("../../../public/js/features/projects.js", () => ({
+  loadProjectCommands: vi.fn(),
 }));
 
 // ── Mock api helpers used by skills-manager ─────────────────────────────────
 
 const mockApi = {
-  fetchSkillsConfig: vi.fn(),
-  saveSkillsConfig: vi.fn(),
-  searchSkills: vi.fn(),
-  aiSearchSkills: vi.fn(),
   fetchInstalledSkills: vi.fn(),
-  installSkill: vi.fn(),
+  installSkillFromPath: vi.fn(),
+  installSkillFromArchive: vi.fn(),
   uninstallSkill: vi.fn(),
   toggleSkill: vi.fn(),
 };
@@ -82,6 +48,7 @@ describe("skills-manager", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     document.body.innerHTML = "";
+    localStorage.removeItem("claudeck-skill-scope");
   });
 
   describe("tab registration", () => {
@@ -115,7 +82,7 @@ describe("skills-manager", () => {
         getProjectPath: () => "/test/project",
         getSessionId: () => "session-1",
       };
-      mockApi.fetchSkillsConfig.mockResolvedValue({ activated: false, apiKey: "", defaultScope: "project" });
+      mockApi.fetchInstalledSkills.mockResolvedValue([]);
 
       const el = registeredTabs.skills.init(ctx);
       expect(el).toBeInstanceOf(HTMLElement);
@@ -123,85 +90,44 @@ describe("skills-manager", () => {
     });
   });
 
-  describe("activation form", () => {
-    it("renders activation form when not activated", async () => {
+  describe("panel layout", () => {
+    it("shows add skill buttons", async () => {
       const ctx = {
         api: mockApi,
         on: vi.fn(),
         getProjectPath: () => "/test",
         getSessionId: () => "s1",
       };
-      mockApi.fetchSkillsConfig.mockResolvedValue({ activated: false, apiKey: "" });
-
-      const el = registeredTabs.skills.init(ctx);
-      document.body.appendChild(el);
-
-      // Wait for async checkActivation
-      await new Promise((r) => setTimeout(r, 50));
-
-      expect(el.querySelector(".skills-activate")).not.toBeNull();
-      expect(el.querySelector(".skills-activate h3").textContent).toBe("Skills Marketplace");
-      expect(el.querySelector(".skills-activate-input")).not.toBeNull();
-      expect(el.querySelector(".skills-activate-btn")).not.toBeNull();
-    });
-  });
-
-  describe("marketplace UI", () => {
-    it("renders marketplace when activated", async () => {
-      const ctx = {
-        api: mockApi,
-        on: vi.fn(),
-        getProjectPath: () => "/test",
-        getSessionId: () => "s1",
-      };
-      mockApi.fetchSkillsConfig.mockResolvedValue({
-        activated: true,
-        apiKey: "sk_live_skillsmp_...1234",
-        defaultScope: "project",
-        searchMode: "keyword",
-      });
       mockApi.fetchInstalledSkills.mockResolvedValue([]);
 
       const el = registeredTabs.skills.init(ctx);
       document.body.appendChild(el);
-
       await new Promise((r) => setTimeout(r, 50));
 
-      expect(el.querySelector(".skills-subtabs")).not.toBeNull();
-      const tabs = el.querySelectorAll(".skills-subtab");
-      expect(tabs.length).toBe(3);
-      expect(tabs[0].textContent).toBe("Browse");
-      expect(tabs[1].textContent).toBe("Installed");
-      expect(tabs[2].textContent).toBe("Settings");
-    });
-  });
+      expect(el.querySelector(".skills-add-section")).not.toBeNull();
+      expect(el.querySelector(".skills-add-btns")).not.toBeNull();
 
-  describe("initial browse state", () => {
-    it("shows discover message when no search query", async () => {
+      const btns = el.querySelectorAll(".skills-add-btn");
+      expect(btns.length).toBe(2);
+      expect(btns[0].textContent).toContain("From Directory");
+      expect(btns[1].textContent).toContain("From Archive");
+    });
+
+    it("shows installed skills header", async () => {
       const ctx = {
         api: mockApi,
         on: vi.fn(),
         getProjectPath: () => "/test",
         getSessionId: () => "s1",
       };
-      mockApi.fetchSkillsConfig.mockResolvedValue({
-        activated: true,
-        apiKey: "sk_live_skillsmp_...1234",
-        defaultScope: "project",
-        searchMode: "keyword",
-      });
       mockApi.fetchInstalledSkills.mockResolvedValue([]);
-
-      // Clear saved query
-      localStorage.removeItem("claudeck-skills-query");
 
       const el = registeredTabs.skills.init(ctx);
       document.body.appendChild(el);
       await new Promise((r) => setTimeout(r, 50));
 
-      const initial = el.querySelector(".skills-initial-state");
-      expect(initial).not.toBeNull();
-      expect(initial.querySelector(".skills-initial-title").textContent).toBe("Discover agent skills");
+      expect(el.querySelector(".skills-installed-header")).not.toBeNull();
+      expect(el.querySelector(".skills-installed-header").textContent).toBe("Installed Skills");
     });
   });
 
@@ -213,24 +139,13 @@ describe("skills-manager", () => {
         getProjectPath: () => "/test",
         getSessionId: () => "s1",
       };
-      mockApi.fetchSkillsConfig.mockResolvedValue({
-        activated: true,
-        apiKey: "sk_live_skillsmp_...1234",
-        defaultScope: "project",
-        searchMode: "keyword",
-      });
       mockApi.fetchInstalledSkills.mockResolvedValue([]);
 
       const el = registeredTabs.skills.init(ctx);
       document.body.appendChild(el);
       await new Promise((r) => setTimeout(r, 50));
 
-      // Click Installed tab
-      const installedTab = el.querySelectorAll(".skills-subtab")[1];
-      installedTab.click();
-      await new Promise((r) => setTimeout(r, 50));
-
-      const empty = el.querySelector(".skills-empty");
+      const empty = el.querySelector(".skills-empty-state");
       expect(empty).not.toBeNull();
       expect(empty.textContent).toContain("No skills installed");
     });
@@ -242,12 +157,6 @@ describe("skills-manager", () => {
         getProjectPath: () => "/test",
         getSessionId: () => "s1",
       };
-      mockApi.fetchSkillsConfig.mockResolvedValue({
-        activated: true,
-        apiKey: "sk_live_skillsmp_...1234",
-        defaultScope: "project",
-        searchMode: "keyword",
-      });
       mockApi.fetchInstalledSkills.mockResolvedValue([
         { name: "skill-a", dirName: "skill-a", description: "Desc A", scope: "project", enabled: true, path: "/test/.claude/skills/skill-a" },
         { name: "skill-b", dirName: "skill-b", description: "Desc B", scope: "global", enabled: false, path: "/home/.claude/skills/skill-b" },
@@ -255,10 +164,6 @@ describe("skills-manager", () => {
 
       const el = registeredTabs.skills.init(ctx);
       document.body.appendChild(el);
-      await new Promise((r) => setTimeout(r, 50));
-
-      const installedTab = el.querySelectorAll(".skills-subtab")[1];
-      installedTab.click();
       await new Promise((r) => setTimeout(r, 50));
 
       const headers = el.querySelectorAll(".skills-scope-header");
@@ -269,33 +174,44 @@ describe("skills-manager", () => {
       const rows = el.querySelectorAll(".skill-installed-row");
       expect(rows.length).toBe(2);
     });
-  });
 
-  describe("search mode hint", () => {
-    it("shows keyword hint by default", async () => {
+    it("shows toggle switch for each installed skill", async () => {
       const ctx = {
         api: mockApi,
         on: vi.fn(),
         getProjectPath: () => "/test",
         getSessionId: () => "s1",
       };
-      mockApi.fetchSkillsConfig.mockResolvedValue({
-        activated: true,
-        apiKey: "sk_live_skillsmp_...1234",
-        defaultScope: "project",
-        searchMode: "keyword",
-      });
-      mockApi.fetchInstalledSkills.mockResolvedValue([]);
-      localStorage.removeItem("claudeck-skills-query");
-      localStorage.setItem("claudeck-skills-mode", "keyword");
+      mockApi.fetchInstalledSkills.mockResolvedValue([
+        { name: "skill-a", dirName: "skill-a", description: "Desc A", scope: "project", enabled: true, path: "/test/.claude/skills/skill-a" },
+      ]);
 
       const el = registeredTabs.skills.init(ctx);
       document.body.appendChild(el);
       await new Promise((r) => setTimeout(r, 50));
 
-      const hint = el.querySelector(".skills-search-hint");
-      expect(hint).not.toBeNull();
-      expect(hint.textContent).toContain("keyword");
+      const toggle = el.querySelector(".skill-toggle");
+      expect(toggle).not.toBeNull();
+      expect(toggle.querySelector("input[type='checkbox']").checked).toBe(true);
+    });
+
+    it("shows uninstall button for each installed skill", async () => {
+      const ctx = {
+        api: mockApi,
+        on: vi.fn(),
+        getProjectPath: () => "/test",
+        getSessionId: () => "s1",
+      };
+      mockApi.fetchInstalledSkills.mockResolvedValue([
+        { name: "skill-a", dirName: "skill-a", description: "Desc A", scope: "project", enabled: true, path: "/test/.claude/skills/skill-a" },
+      ]);
+
+      const el = registeredTabs.skills.init(ctx);
+      document.body.appendChild(el);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const delBtn = el.querySelector(".skill-uninstall-btn");
+      expect(delBtn).not.toBeNull();
     });
   });
 });
