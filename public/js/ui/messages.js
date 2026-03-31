@@ -334,6 +334,56 @@ export function appendThinkingBlock(thinking, redacted, pane) {
   }
 }
 
+// Start a streaming thinking block (collapsible, content appended via appendThinkingDelta)
+export function startThinkingBlock(redacted, pane) {
+  pane = pane || getPane(null);
+  removeThinking(pane); // remove the animated thinking bar
+  const details = document.createElement("details");
+  details.className = "thinking-block thinking-block-streaming";
+  details.setAttribute("data-streaming", "true");
+  const summary = document.createElement("summary");
+  summary.className = "thinking-block-summary";
+  summary.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg> Thinking<span class="thinking-block-dots"><span>.</span><span>.</span><span>.</span></span>`;
+  details.appendChild(summary);
+  const body = document.createElement("div");
+  body.className = "thinking-block-body";
+  if (redacted) body.textContent = "(thinking content redacted)";
+  details.appendChild(body);
+  pane.messagesDiv.appendChild(details);
+  scrollToBottom(pane);
+}
+
+// Append streaming thinking text to the current thinking block
+export function appendThinkingDelta(text, pane) {
+  pane = pane || getPane(null);
+  const block = pane.messagesDiv.querySelector('.thinking-block[data-streaming="true"]');
+  if (!block) return;
+  const body = block.querySelector(".thinking-block-body");
+  if (body) body.textContent += text;
+  scrollToBottom(pane);
+
+  // Update streaming token counter
+  let count = getState("streamingCharCount") + text.length;
+  setState("streamingCharCount", count);
+  const tokenEst = Math.round(count / 4);
+  if ($.streamingTokens) {
+    if ($.streamingTokensValue) $.streamingTokensValue.textContent = `~${tokenEst} tokens`;
+    $.streamingTokens.classList.remove("hidden");
+    if ($.streamingTokensSep) $.streamingTokensSep.classList.remove("hidden");
+  }
+}
+
+// Finalize a streaming thinking block
+export function endThinkingBlock(pane) {
+  pane = pane || getPane(null);
+  const block = pane.messagesDiv.querySelector('.thinking-block[data-streaming="true"]');
+  if (!block) return;
+  block.removeAttribute("data-streaming");
+  block.classList.remove("thinking-block-streaming");
+  const dots = block.querySelector(".thinking-block-dots");
+  if (dots) dots.remove();
+}
+
 export function appendCliOutput(data, pane) {
   pane = pane || getPane(null);
   const div = document.createElement("div");

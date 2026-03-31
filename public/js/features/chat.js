@@ -4,7 +4,7 @@ import { getState, setState } from '../core/store.js';
 import { CHAT_IDS, BOT_CHAT_ID } from '../core/constants.js';
 import { on } from '../core/events.js';
 import { commandRegistry, dismissAutocomplete, handleAutocompleteKeydown, handleSlashAutocomplete, registerCommand } from '../ui/commands.js';
-import { addUserMessage, appendAssistantText, appendToolIndicator, appendToolResult, appendThinkingBlock, showThinking, removeThinking, addResultSummary, addStatus, showWhalyPlaceholder, addSkillUsedMessage } from '../ui/messages.js';
+import { addUserMessage, appendAssistantText, appendToolIndicator, appendToolResult, appendThinkingBlock, startThinkingBlock, appendThinkingDelta, endThinkingBlock, showThinking, removeThinking, addResultSummary, addStatus, showWhalyPlaceholder, addSkillUsedMessage } from '../ui/messages.js';
 import { getPane, panes, _setChatFns, _setInputHistoryGetter } from '../ui/parallel.js';
 import { loadSessions } from './sessions.js';
 import { loadStats, loadAccountInfo } from './cost-dashboard.js';
@@ -452,6 +452,18 @@ function handleServerMessage(msg) {
 
     case "thinking":
       appendThinkingBlock(msg.thinking, msg.redacted, pane);
+      break;
+
+    case "thinking_start":
+      startThinkingBlock(msg.redacted, pane);
+      break;
+
+    case "thinking_delta":
+      appendThinkingDelta(msg.text, pane);
+      break;
+
+    case "thinking_end":
+      endThinkingBlock(pane);
       break;
 
     case "tool":

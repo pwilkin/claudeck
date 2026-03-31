@@ -159,6 +159,7 @@ export async function processSdkStream(q, { ws, wsSend, sessionIds, clientSid, c
   let sessionModel = null;
   let lastMetrics = {}; // Captured from result for Telegram notifications
   const wfMeta = isWorkflow ? { workflowId: workflowId || null, stepIndex: stepIndex ?? null, stepLabel: stepLabel || null } : null;
+  const streamedBlockTypes = new Set();
 
   for await (const sdkMsg of q) {
     if (ws.readyState !== 1) break;
@@ -215,31 +216,60 @@ export async function processSdkStream(q, { ws, wsSend, sessionIds, clientSid, c
       continue;
     }
 
+    // Streaming partial messages — thinking and text deltas
+    if (sdkMsg.type === "stream_event" && sdkMsg.event) {
+      const ev = sdkMsg.event;
+      if (ev.type === "content_block_start") {
+        const cb = ev.content_block;
+        if (cb?.type === "thinking") {
+          streamedBlockTypes.add(ev.index);
+          wsSend({ type: "thinking_start" });
+        } else if (cb?.type === "redacted_thinking") {
+          streamedBlockTypes.add(ev.index);
+          wsSend({ type: "thinking_start", redacted: true });
+        } else if (cb?.type === "text") {
+          streamedBlockTypes.add(ev.index);
+        }
+      } else if (ev.type === "content_block_delta") {
+        if (ev.delta?.type === "thinking_delta") {
+          wsSend({ type: "thinking_delta", text: ev.delta.thinking || "" });
+        } else if (ev.delta?.type === "text_delta") {
+          wsSend({ type: "text", text: ev.delta.text || "" });
+        }
+      }
+      continue;
+    }
+
     // Assistant message — extract text and tool_use blocks
     if (sdkMsg.type === "assistant" && sdkMsg.message?.content) {
-      for (const block of sdkMsg.message.content) {
-        if (block.type === "text" && block.text) {
-          wsSend({ type: "text", text: block.text });
-          if (resolvedSid) {
-            addMessage(resolvedSid, "assistant", JSON.stringify({ text: block.text }), chatId || null, wfMeta);
+      for (let i = 0; i < sdkMsg.message.content.length; i++) {
+        const block = sdkMsg.message.content[i];
+        const alreadyStreamed = streamedBlockTypes.has(i);
+        if (block.type === "text") {
+          if (resolvedSid) addMessage(resolvedSid, "assistant", JSON.stringify({ text: block.text }), chatId || null, wfMeta);
+          if (!alreadyStreamed && block.text) {
+            wsSend({ type: "text", text: block.text });
           }
         } else if (block.type === "thinking") {
-          wsSend({ type: "thinking", thinking: block.thinking || "", redacted: false });
-          if (resolvedSid) {
-            addMessage(resolvedSid, "thinking", JSON.stringify({ thinking: block.thinking || "", redacted: false }), chatId || null, wfMeta);
+          if (resolvedSid) addMessage(resolvedSid, "thinking", JSON.stringify({ thinking: block.thinking || "", redacted: false }), chatId || null, wfMeta);
+          if (!alreadyStreamed) {
+            wsSend({ type: "thinking", thinking: block.thinking || "", redacted: false });
+          } else {
+            wsSend({ type: "thinking_end" });
           }
         } else if (block.type === "redacted_thinking") {
-          wsSend({ type: "thinking", thinking: "", redacted: true });
-          if (resolvedSid) {
-            addMessage(resolvedSid, "thinking", JSON.stringify({ thinking: "", redacted: true }), chatId || null, wfMeta);
+          if (resolvedSid) addMessage(resolvedSid, "thinking", JSON.stringify({ thinking: "", redacted: true }), chatId || null, wfMeta);
+          if (!alreadyStreamed) {
+            wsSend({ type: "thinking", thinking: "", redacted: true });
+          } else {
+            wsSend({ type: "thinking_end", redacted: true });
           }
         } else if (block.type === "tool_use") {
           wsSend({ type: "tool", id: block.id, name: block.name, input: block.input });
-          if (resolvedSid) {
-            addMessage(resolvedSid, "tool", JSON.stringify({ id: block.id, name: block.name, input: block.input }), chatId || null, wfMeta);
-          }
+          if (resolvedSid) addMessage(resolvedSid, "tool", JSON.stringify({ id: block.id, name: block.name, input: block.input }), chatId || null, wfMeta);
         }
       }
+      streamedBlockTypes.clear();
       continue;
     }
 
@@ -379,7 +409,7 @@ export function handleClose({ activeQueries, pendingApprovals, persistentSession
 }
 
 // ── Extracted handler: abort ──────────────────────────────────────────────
-export function handleAbort(msg, { activeQueries, pendingApprovals, persistentSessionKeys }) {
+export function handleAbort(msg, { ws, activeQueries, pendingApprovals, persistentSessionKeys }) {
   if (msg.chatId) {
     // Try abort via session manager for persistent sessions
     const key = persistentSessionKeys?.find(k => k.endsWith(`::${msg.chatId}`));
@@ -404,6 +434,15 @@ export function handleAbort(msg, { activeQueries, pendingApprovals, persistentSe
     resolve({ behavior: "deny", message: "Aborted by user" });
   }
   pendingApprovals.clear();
+
+  // Send aborted+done to frontend — query.close() terminates without yielding a result
+  if (ws.readyState === 1) {
+    const abortedPayload = { type: "aborted" };
+    const donePayload = { type: "done" };
+    if (msg.chatId) { abortedPayload.chatId = msg.chatId; donePayload.chatId = msg.chatId; }
+    ws.send(JSON.stringify(abortedPayload));
+    ws.send(JSON.stringify(donePayload));
+  }
 }
 
 // ── Extracted handler: permission response ────────────────────────────────
@@ -853,6 +892,7 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
   const turnState = {
     resolvedSid: clientSid,
     lastAssistantText: "",
+    streamedBlockTypes: new Set(), // track which block indices were streamed via partial messages
     lastChatMetrics: {},
     currentMessage: message,
     turnComplete: false,
@@ -930,23 +970,68 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
       return;
     }
 
+    // Streaming partial messages — thinking and text deltas
+    if (sdkMsg.type === "stream_event" && sdkMsg.event) {
+      const ev = sdkMsg.event;
+      if (ev.type === "content_block_start") {
+        const cb = ev.content_block;
+        if (cb?.type === "thinking") {
+          turnState.streamedBlockTypes.add(ev.index);
+          wsSend({ type: "thinking_start" });
+        } else if (cb?.type === "redacted_thinking") {
+          turnState.streamedBlockTypes.add(ev.index);
+          wsSend({ type: "thinking_start", redacted: true });
+        } else if (cb?.type === "text") {
+          turnState.streamedBlockTypes.add(ev.index);
+        }
+      } else if (ev.type === "content_block_delta") {
+        if (ev.delta?.type === "thinking_delta") {
+          wsSend({ type: "thinking_delta", text: ev.delta.thinking || "" });
+        } else if (ev.delta?.type === "text_delta") {
+          const text = ev.delta.text || "";
+          turnState.lastAssistantText += text;
+          wsSend({ type: "text", text });
+        }
+      } else if (ev.type === "content_block_stop") {
+        if (turnState.streamedBlockTypes.has(ev.index)) {
+          // nothing extra needed — the block was streamed
+        }
+      }
+      return;
+    }
+
     if (sdkMsg.type === "assistant" && sdkMsg.message?.content) {
-      for (const block of sdkMsg.message.content) {
-        if (block.type === "text" && block.text) {
-          turnState.lastAssistantText += (turnState.lastAssistantText ? "\n\n" : "") + block.text;
-          wsSend({ type: "text", text: block.text });
+      for (let i = 0; i < sdkMsg.message.content.length; i++) {
+        const block = sdkMsg.message.content[i];
+        const alreadyStreamed = turnState.streamedBlockTypes.has(i);
+        if (block.type === "text") {
+          // Save to DB; only send to client if not already streamed
           if (turnState.resolvedSid) addMessage(turnState.resolvedSid, "assistant", JSON.stringify({ text: block.text }), chatId || null);
+          if (!alreadyStreamed && block.text) {
+            turnState.lastAssistantText += (turnState.lastAssistantText ? "\n\n" : "") + block.text;
+            wsSend({ type: "text", text: block.text });
+          }
         } else if (block.type === "thinking") {
-          wsSend({ type: "thinking", thinking: block.thinking || "", redacted: false });
           if (turnState.resolvedSid) addMessage(turnState.resolvedSid, "thinking", JSON.stringify({ thinking: block.thinking || "", redacted: false }), chatId || null);
+          if (!alreadyStreamed) {
+            wsSend({ type: "thinking", thinking: block.thinking || "", redacted: false });
+          } else {
+            // Finalize the streamed thinking block
+            wsSend({ type: "thinking_end" });
+          }
         } else if (block.type === "redacted_thinking") {
-          wsSend({ type: "thinking", thinking: "", redacted: true });
           if (turnState.resolvedSid) addMessage(turnState.resolvedSid, "thinking", JSON.stringify({ thinking: "", redacted: true }), chatId || null);
+          if (!alreadyStreamed) {
+            wsSend({ type: "thinking", thinking: "", redacted: true });
+          } else {
+            wsSend({ type: "thinking_end", redacted: true });
+          }
         } else if (block.type === "tool_use") {
           wsSend({ type: "tool", id: block.id, name: block.name, input: block.input });
           if (turnState.resolvedSid) addMessage(turnState.resolvedSid, "tool", JSON.stringify({ id: block.id, name: block.name, input: block.input }), chatId || null);
         }
       }
+      turnState.streamedBlockTypes.clear();
       return;
     }
 

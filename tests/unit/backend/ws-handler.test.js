@@ -1733,8 +1733,10 @@ describe("ws-handler", () => {
       // Send abort with specific chatId
       await onMessage(JSON.stringify({ type: "abort", chatId: "chat-to-abort" }));
 
-      // No error thrown
-      expect(ws.send).not.toHaveBeenCalled();
+      // Should send aborted+done to frontend
+      expect(ws.send).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(ws.send.mock.calls[0][0]).type).toBe("aborted");
+      expect(JSON.parse(ws.send.mock.calls[1][0]).type).toBe("done");
     });
 
     it("abort message without chatId aborts all queries", async () => {
@@ -1750,8 +1752,10 @@ describe("ws-handler", () => {
       // Send abort without chatId (abort all)
       await onMessage(JSON.stringify({ type: "abort" }));
 
-      // No error thrown
-      expect(ws.send).not.toHaveBeenCalled();
+      // Should send aborted+done to frontend
+      expect(ws.send).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(ws.send.mock.calls[0][0]).type).toBe("aborted");
+      expect(JSON.parse(ws.send.mock.calls[1][0]).type).toBe("done");
     });
 
     it("abort denies pending approvals", async () => {
@@ -2221,6 +2225,8 @@ describe("ws-handler", () => {
   // handleAbort — direct unit tests
   // ══════════════════════════════════════════════════════════════════════════
   describe("handleAbort (direct)", () => {
+    const mockWs = () => ({ readyState: 1, send: vi.fn() });
+
     it("aborts specific query when chatId is provided", () => {
       const abortFn1 = vi.fn();
       const abortFn2 = vi.fn();
@@ -2230,7 +2236,7 @@ describe("ws-handler", () => {
       ]);
       const pendingApprovals = new Map();
 
-      handleAbort({ chatId: "chat-1" }, { activeQueries, pendingApprovals });
+      handleAbort({ chatId: "chat-1" }, { ws: mockWs(), activeQueries, pendingApprovals });
 
       expect(abortFn1).toHaveBeenCalledOnce();
       expect(abortFn2).not.toHaveBeenCalled();
@@ -2247,7 +2253,7 @@ describe("ws-handler", () => {
       ]);
       const pendingApprovals = new Map();
 
-      handleAbort({}, { activeQueries, pendingApprovals });
+      handleAbort({}, { ws: mockWs(), activeQueries, pendingApprovals });
 
       expect(abortFn1).toHaveBeenCalledOnce();
       expect(abortFn2).toHaveBeenCalledOnce();
@@ -2262,7 +2268,7 @@ describe("ws-handler", () => {
         ["p1", { resolve: resolve1, timer: timer1 }],
       ]);
 
-      handleAbort({}, { activeQueries, pendingApprovals });
+      handleAbort({}, { ws: mockWs(), activeQueries, pendingApprovals });
 
       expect(resolve1).toHaveBeenCalledWith({ behavior: "deny", message: "Aborted by user" });
       expect(pendingApprovals.size).toBe(0);
@@ -2273,9 +2279,21 @@ describe("ws-handler", () => {
       const pendingApprovals = new Map();
 
       // Should not throw
-      handleAbort({ chatId: "nonexistent" }, { activeQueries, pendingApprovals });
+      handleAbort({ chatId: "nonexistent" }, { ws: mockWs(), activeQueries, pendingApprovals });
 
       expect(activeQueries.size).toBe(0);
+    });
+
+    it("sends aborted and done to frontend", () => {
+      const ws = mockWs();
+      const activeQueries = new Map();
+      const pendingApprovals = new Map();
+
+      handleAbort({}, { ws, activeQueries, pendingApprovals });
+
+      expect(ws.send).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(ws.send.mock.calls[0][0])).toEqual({ type: "aborted" });
+      expect(JSON.parse(ws.send.mock.calls[1][0])).toEqual({ type: "done" });
     });
   });
 

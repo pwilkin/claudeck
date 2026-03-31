@@ -79,7 +79,7 @@ export function createOrResumeSession(sessionKey, options, onMessage) {
 
   const q = query({
     prompt: stream,
-    options: { ...options, abortController },
+    options: { ...options, abortController, includePartialMessages: true },
   });
 
   let resolveFirstResult;
@@ -122,8 +122,9 @@ export function sendToSession(sessionKey, message, images, claudeSessionId) {
 export function abortSession(sessionKey) {
   const session = sessions.get(sessionKey);
   if (!session) return;
-  try { session.query.interrupt(); } catch { /* exists */ }
   session.stream.close();
+  try { session.query.close(); } catch { /* ignore */ }
+  sessions.delete(sessionKey);
 }
 
 export function closeSession(sessionKey) {
