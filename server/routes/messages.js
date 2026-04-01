@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { getMessages, getMessagesByChatId, getMessagesNoChatId } from "../../db.js";
+import { getClaudeSessionId } from "../../db.js";
 import { getSessionMessages as sdkGetSessionMessages } from "@anthropic-ai/claude-agent-sdk";
 
 const router = Router();
@@ -61,11 +61,9 @@ function convertSdkMessages(sdkMessages) {
   return result;
 }
 
-// Get all messages for a session — fall back to SDK if not in Claudeck DB
+// Get all messages for a session — always use SDK
 router.get("/:id/messages", async (req, res) => {
   try {
-    const messages = getMessages(req.params.id);
-    if (messages.length > 0) return res.json(messages);
     const sdkMessages = await sdkGetSessionMessages(req.params.id);
     res.json(convertSdkMessages(sdkMessages));
   } catch (err) {
@@ -73,21 +71,21 @@ router.get("/:id/messages", async (req, res) => {
   }
 });
 
-// Get messages filtered by chatId
-router.get("/:id/messages/:chatId", (req, res) => {
+// Get messages filtered by chatId — look up the Claude session ID, then fetch from SDK
+router.get("/:id/messages/:chatId", async (req, res) => {
   try {
-    const messages = getMessagesByChatId(req.params.id, req.params.chatId);
-    res.json(messages);
+    const claudeSessionId = getClaudeSessionId(req.params.id, req.params.chatId);
+    if (!claudeSessionId) return res.json([]);
+    const sdkMessages = await sdkGetSessionMessages(claudeSessionId);
+    res.json(convertSdkMessages(sdkMessages));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Get messages where chat_id IS NULL (single-mode) — fall back to SDK
+// Get messages for single-mode session — always use SDK
 router.get("/:id/messages-single", async (req, res) => {
   try {
-    const messages = getMessagesNoChatId(req.params.id);
-    if (messages.length > 0) return res.json(messages);
     const sdkMessages = await sdkGetSessionMessages(req.params.id);
     res.json(convertSdkMessages(sdkMessages));
   } catch (err) {

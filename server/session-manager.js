@@ -26,7 +26,8 @@ async function consumeOutput(sessionKey) {
   const origSession = sessions.get(sessionKey);
   if (!origSession) return;
 
-  const { query: q, onMessage, stream } = origSession;
+  // Read onMessage dynamically so it can be swapped via updateSessionCallback
+  const { query: q, stream } = origSession;
   origSession.consuming = true;
   let error = null;
 
@@ -34,12 +35,12 @@ async function consumeOutput(sessionKey) {
     for await (const msg of q) {
       if (stream.isDone) break;
       try {
-        const shouldStop = onMessage(sessionKey, msg);
+        const shouldStop = origSession.onMessage(sessionKey, msg);
         if (shouldStop === false) {
           stream.close();
           break;
         }
-      } catch { /* exists */ }
+      } catch { /* ignore callback errors */ }
       if (msg.type === "result" && origSession.resolveFirstResult) {
         origSession.resolveFirstResult();
         origSession.resolveFirstResult = null;
@@ -49,7 +50,7 @@ async function consumeOutput(sessionKey) {
   } catch (err) {
     error = err;
     if (err.name !== "AbortError" && !origSession.resolveFirstResult) {
-      try { onMessage(sessionKey, { type: "session_error", error: err.message }); } catch { /* exists */ }
+      try { origSession.onMessage(sessionKey, { type: "session_error", error: err.message }); } catch { /* ignore */ }
     }
   }
 
@@ -65,6 +66,10 @@ async function consumeOutput(sessionKey) {
 
   if (sessions.get(sessionKey) === origSession) {
     origSession.consuming = false;
+    // Fire completion callback (e.g. for cleanup after detached sessions finish)
+    if (origSession.onComplete) {
+      try { origSession.onComplete(sessionKey); } catch { /* ignore */ }
+    }
     sessions.delete(sessionKey);
   }
 }
@@ -97,6 +102,9 @@ export function createOrResumeSession(sessionKey, options, onMessage) {
     cwd: options.cwd || null,
     consuming: false,
     onMessage,
+    wsRef: null,        // mutable WS reference, set by caller via setSessionWsRef
+    detached: false,    // true when WS disconnected but session still running
+    onComplete: null,   // called when consumeOutput finishes (for detached cleanup)
     firstResultPromise,
     resolveFirstResult,
     rejectFirstResult,
@@ -119,6 +127,7 @@ export function sendToSession(sessionKey, message, images, claudeSessionId) {
   return { ok: true };
 }
 
+// Forcefully stop a session (user clicked Stop)
 export function abortSession(sessionKey) {
   const session = sessions.get(sessionKey);
   if (!session) return;
@@ -127,12 +136,60 @@ export function abortSession(sessionKey) {
   sessions.delete(sessionKey);
 }
 
+// Fully close and destroy a session
 export function closeSession(sessionKey) {
   const session = sessions.get(sessionKey);
   if (!session) return;
   session.stream.close();
-  try { session.query.close(); } catch { /* exists */ }
+  try { session.query.close(); } catch { /* ignore */ }
   sessions.delete(sessionKey);
+}
+
+// Detach session from its WS — session keeps running, messages are silently dropped
+export function detachSession(sessionKey) {
+  const session = sessions.get(sessionKey);
+  if (!session) return;
+  session.detached = true;
+  if (session.wsRef) session.wsRef.ws = null;
+}
+
+// Detach all sessions for a closing connection (don't kill them)
+export function detachSessionsForConnection(sessionKeys) {
+  for (const sessionKey of sessionKeys) {
+    detachSession(sessionKey);
+  }
+}
+
+// Update the onMessage callback (for WS re-attachment)
+export function updateSessionCallback(sessionKey, newOnMessage) {
+  const session = sessions.get(sessionKey);
+  if (!session) return false;
+  session.onMessage = newOnMessage;
+  session.detached = false;
+  return true;
+}
+
+// Get/set the mutable WS reference stored on a session
+export function setSessionWsRef(sessionKey, wsRef) {
+  const session = sessions.get(sessionKey);
+  if (session) session.wsRef = wsRef;
+}
+
+export function getSessionWsRef(sessionKey) {
+  const session = sessions.get(sessionKey);
+  return session?.wsRef || null;
+}
+
+// Get session metadata for inspection
+export function getSessionMeta(sessionKey) {
+  const session = sessions.get(sessionKey);
+  if (!session) return null;
+  return {
+    detached: session.detached,
+    consuming: session.consuming,
+    cwd: session.cwd,
+    isDone: session.stream.isDone,
+  };
 }
 
 export function closeAllSessions() {
@@ -141,6 +198,7 @@ export function closeAllSessions() {
   }
 }
 
+// Keep for backward compat — but prefer detachSessionsForConnection
 export function closeSessionsForConnection(sessionKeys) {
   for (const sessionKey of sessionKeys) {
     closeSession(sessionKey);

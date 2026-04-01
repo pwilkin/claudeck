@@ -16,7 +16,6 @@ import {
   updateClaudeSessionId,
   getSession,
   addCost,
-  addMessage,
   getTotalCost,
   updateSessionTitle,
   setAgentContext,
@@ -215,12 +214,6 @@ export async function runOrchestrator({
         }
 
         orchSend({ type: "session", sessionId: ourSid });
-        addMessage(
-          resolvedSid,
-          "user",
-          JSON.stringify({ text: `[Orchestrator] ${task}` }),
-          null,
-        );
         continue;
       }
 
@@ -229,14 +222,6 @@ export async function runOrchestrator({
           if (block.type === "text" && block.text) {
             plannerText += block.text;
             orchSend({ type: "text", text: block.text });
-            if (resolvedSid) {
-              addMessage(
-                resolvedSid,
-                "assistant",
-                JSON.stringify({ text: block.text }),
-                null,
-              );
-            }
           }
         }
         continue;
@@ -442,14 +427,6 @@ export async function runOrchestrator({
           for (const block of sdkMsg.message.content) {
             if (block.type === "text" && block.text) {
               orchSend({ type: "text", text: block.text });
-              if (resolvedSid) {
-                addMessage(
-                  resolvedSid,
-                  "assistant",
-                  JSON.stringify({ text: block.text }),
-                  null,
-                );
-              }
             }
           }
           continue;

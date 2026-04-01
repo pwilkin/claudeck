@@ -31,7 +31,7 @@ export function setSessionIds(map) {
 function sdkSessionToRow(s, meta = {}) {
   return {
     id: s.sessionId,
-    title: s.customTitle || null,
+    title: s.customTitle || s.summary || s.firstPrompt || null,
     summary: s.summary || null,
     project_path: s.cwd || null,
     project_name: s.cwd ? basename(s.cwd) : null,

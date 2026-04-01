@@ -252,10 +252,7 @@ db.exec(`
 // Deduplicated mode CASE subquery — used in 4 session listing queries
 const MODE_CASE = `
   CASE
-    WHEN EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.chat_id IS NOT NULL)
-         AND EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.chat_id IS NULL)
-      THEN 'both'
-    WHEN EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.chat_id IS NOT NULL)
+    WHEN EXISTS (SELECT 1 FROM claude_sessions cs WHERE cs.session_id = s.id AND cs.chat_id != '')
       THEN 'parallel'
     ELSE 'single'
   END AS mode`;

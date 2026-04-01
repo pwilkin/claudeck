@@ -7,7 +7,6 @@ import {
   getSession,
   touchSession,
   addCost,
-  addMessage,
   getTotalCost,
   setClaudeSession,
   updateSessionTitle,
@@ -27,8 +26,12 @@ import {
   sendToSession as pushToSession,
   abortSession as smAbortSession,
   closeSession as smCloseSession,
-  closeSessionsForConnection,
+  detachSessionsForConnection,
   hasActiveSession,
+  getSessionMeta,
+  setSessionWsRef,
+  getSessionWsRef,
+  updateSessionCallback,
   setSessionModel,
   setSessionPermissionMode,
 } from "./session-manager.js";
@@ -191,7 +194,6 @@ export async function processSdkStream(q, { ws, wsSend, sessionIds, clientSid, c
       wsSend({ type: "session", sessionId: ourSid });
 
       if (isWorkflow) {
-        addMessage(resolvedSid, "user", JSON.stringify({ text: `[${stepLabel}]` }), null, wfMeta);
       }
       continue;
     }
@@ -205,9 +207,6 @@ export async function processSdkStream(q, { ws, wsSend, sessionIds, clientSid, c
     // Local command output (e.g. /compact summary)
     if (sdkMsg.type === "system" && sdkMsg.subtype === "local_command_output") {
       wsSend({ type: "text", text: sdkMsg.content });
-      if (resolvedSid) {
-        addMessage(resolvedSid, "assistant", JSON.stringify({ text: sdkMsg.content }), chatId || null, wfMeta);
-      }
       continue;
     }
 
@@ -247,19 +246,16 @@ export async function processSdkStream(q, { ws, wsSend, sessionIds, clientSid, c
         const streamIdx = streamedContentIndex++;
         const alreadyStreamed = streamedBlockIndices.has(streamIdx);
         if (block.type === "text") {
-          if (resolvedSid) addMessage(resolvedSid, "assistant", JSON.stringify({ text: block.text }), chatId || null, wfMeta);
           if (!alreadyStreamed && block.text) {
             wsSend({ type: "text", text: block.text });
           }
         } else if (block.type === "thinking") {
-          if (resolvedSid) addMessage(resolvedSid, "thinking", JSON.stringify({ thinking: block.thinking || "", redacted: false }), chatId || null, wfMeta);
           if (!alreadyStreamed) {
             wsSend({ type: "thinking", thinking: block.thinking || "", redacted: false });
           } else {
             wsSend({ type: "thinking_end" });
           }
         } else if (block.type === "redacted_thinking") {
-          if (resolvedSid) addMessage(resolvedSid, "thinking", JSON.stringify({ thinking: "", redacted: true }), chatId || null, wfMeta);
           if (!alreadyStreamed) {
             wsSend({ type: "thinking", thinking: "", redacted: true });
           } else {
@@ -267,7 +263,6 @@ export async function processSdkStream(q, { ws, wsSend, sessionIds, clientSid, c
           }
         } else if (block.type === "tool_use") {
           wsSend({ type: "tool", id: block.id, name: block.name, input: block.input });
-          if (resolvedSid) addMessage(resolvedSid, "tool", JSON.stringify({ id: block.id, name: block.name, input: block.input }), chatId || null, wfMeta);
         }
       }
       continue;
@@ -306,16 +301,6 @@ export async function processSdkStream(q, { ws, wsSend, sessionIds, clientSid, c
         });
 
         lastMetrics = { durationMs, costUsd, inputTokens, outputTokens, model, turns: numTurns, isError: false };
-
-        if (resolvedSid) {
-          addMessage(resolvedSid, "result", JSON.stringify({
-            duration_ms: sdkMsg.duration_ms,
-            num_turns: sdkMsg.num_turns,
-            cost_usd: sdkMsg.total_cost_usd,
-            model,
-            stop_reason: "success",
-          }), chatId || null, wfMeta);
-        }
       } else if (sdkMsg.subtype?.startsWith("error")) {
         const errMsg = sdkMsg.errors?.join(", ") || "Unknown error";
         const costUsd = sdkMsg.total_cost_usd || 0;
@@ -331,7 +316,6 @@ export async function processSdkStream(q, { ws, wsSend, sessionIds, clientSid, c
         )?.[0];
         if (sid) {
           addCost(sid, costUsd, durationMs, numTurns, inputTokens, outputTokens, { model, stopReason: sdkMsg.subtype, isError: 1, cacheReadTokens, cacheCreationTokens });
-          addMessage(sid, "error", JSON.stringify({ error: errMsg, subtype: sdkMsg.subtype, duration_ms: durationMs, cost_usd: costUsd, model }), chatId || null, wfMeta);
         }
         lastMetrics = { durationMs, costUsd, inputTokens, outputTokens, model, turns: numTurns, isError: true, error: errMsg };
         wsSend({ type: "error", error: errMsg });
@@ -354,14 +338,6 @@ export async function processSdkStream(q, { ws, wsSend, sessionIds, clientSid, c
             isError: block.is_error || false,
           };
           wsSend({ type: "tool_result", ...wirePayload });
-          if (resolvedSid) {
-            const dbPayload = {
-              toolUseId: block.tool_use_id,
-              content: text.slice(0, 10000),
-              isError: block.is_error || false,
-            };
-            addMessage(resolvedSid, "tool_result", JSON.stringify(dbPayload), chatId || null, wfMeta);
-          }
         }
       }
       continue;
@@ -398,7 +374,7 @@ export function handleClose({ activeQueries, pendingApprovals, persistentSession
   activeQueries.clear();
 
   if (persistentSessionKeys?.length) {
-    closeSessionsForConnection(persistentSessionKeys);
+    detachSessionsForConnection(persistentSessionKeys);
   }
 
   for (const [id, { resolve, timer }] of pendingApprovals) {
@@ -419,11 +395,24 @@ export function handleAbort(msg, { ws, activeQueries, pendingApprovals, persiste
       const q = activeQueries.get(msg.chatId);
       if (q) { q.abort(); activeQueries.delete(msg.chatId); }
     }
+    // Fallback: try direct session key lookup for orphaned/re-attached sessions
+    if (!key && msg.sessionId) {
+      const directKey = msg.chatId ? `${msg.sessionId}::${msg.chatId}` : msg.sessionId;
+      if (hasActiveSession(directKey)) {
+        smAbortSession(directKey);
+      }
+    }
   } else {
     // Abort persistent sessions
     if (persistentSessionKeys?.length) {
       for (const key of persistentSessionKeys) {
         smAbortSession(key);
+      }
+    }
+    // Fallback: try direct session key lookup for orphaned/re-attached sessions
+    if (msg.sessionId && !persistentSessionKeys?.includes(msg.sessionId)) {
+      if (hasActiveSession(msg.sessionId)) {
+        smAbortSession(msg.sessionId);
       }
     }
     for (const q of activeQueries.values()) q.abort();
@@ -770,19 +759,35 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
 
   // ── Persistent session: push message to existing session if available ──
   if (hasActiveSession(sessionKey)) {
-    const sendResult = pushToSession(sessionKey, message, images);
-    if (sendResult.ok) {
-      // Record user message in DB
-      if (clientSid) {
-        const userMsgData = { text: message };
-        if (images?.length) {
-          userMsgData.images = images.map(i => ({ name: i.name, data: i.data, mimeType: i.mimeType }));
-        }
-        addMessage(clientSid, "user", JSON.stringify(userMsgData), chatId || null);
+    // Re-attach WS if session was detached (browser reconnected to running session)
+    const meta = getSessionMeta(sessionKey);
+    if (meta?.detached) {
+      const existingRef = getSessionWsRef(sessionKey);
+      if (existingRef) {
+        existingRef.ws = ws;
+        existingRef.chatId = chatId;
+      }
+      // Re-register this session on the new connection
+      if (!persistentSessionKeys.includes(sessionKey)) {
+        persistentSessionKeys.push(sessionKey);
+      }
+    }
+
+    if (message) {
+      const sendResult = pushToSession(sessionKey, message, images);
+      if (sendResult.ok) {
+        return;
+      }
+      // Session existed but send failed — fall through to create new
+    } else {
+      // No message — just re-attaching to a running session
+      if (ws.readyState === 1) {
+        const payload = { type: "reattached", sessionId: clientSid };
+        if (chatId) payload.chatId = chatId;
+        ws.send(JSON.stringify(payload));
       }
       return;
     }
-    // Session existed but send failed (e.g. cwd changed) — fall through to create new
   }
 
   // ── No active session: create a new persistent session ──
@@ -904,11 +909,14 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
     sessionModel: null,
   };
 
+  // Mutable WS reference — allows re-attachment when client reconnects
+  const wsRef = { ws, chatId };
+
   function wsSend(payload) {
-    if (ws.readyState !== 1) return;
-    if (chatId) payload.chatId = chatId;
+    if (!wsRef.ws || wsRef.ws.readyState !== 1) return;
+    if (wsRef.chatId) payload.chatId = wsRef.chatId;
     if (turnState.resolvedSid) payload.sessionId = turnState.resolvedSid;
-    ws.send(JSON.stringify(payload));
+    wsRef.ws.send(JSON.stringify(payload));
   }
 
   // ── Track persistent session keys per connection ──
@@ -921,7 +929,9 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
 
   // ── Output consumption callback — called by session-manager for each SDK message ──
   function onMessage(sKey, sdkMsg) {
-    if (ws.readyState !== 1) return;
+    // Always process result messages (for cost tracking + cleanup), even when WS is dead
+    const wsAlive = wsRef.ws && wsRef.ws.readyState === 1;
+    if (!wsAlive && sdkMsg.type !== "result") return;
 
     if (sdkMsg.type === "system" && sdkMsg.subtype === "init") {
       const claudeSessionId = sdkMsg.session_id;
@@ -962,7 +972,6 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
 
     if (sdkMsg.type === "system" && sdkMsg.subtype === "local_command_output") {
       wsSend({ type: "text", text: sdkMsg.content });
-      if (turnState.resolvedSid) addMessage(turnState.resolvedSid, "assistant", JSON.stringify({ text: sdkMsg.content }), chatId || null);
       return;
     }
 
@@ -1008,20 +1017,17 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
         const streamIdx = turnState.streamedContentIndex++;
         const alreadyStreamed = turnState.streamedBlockIndices.has(streamIdx);
         if (block.type === "text") {
-          if (turnState.resolvedSid) addMessage(turnState.resolvedSid, "assistant", JSON.stringify({ text: block.text }), chatId || null);
           if (!alreadyStreamed && block.text) {
             turnState.lastAssistantText += (turnState.lastAssistantText ? "\n\n" : "") + block.text;
             wsSend({ type: "text", text: block.text });
           }
         } else if (block.type === "thinking") {
-          if (turnState.resolvedSid) addMessage(turnState.resolvedSid, "thinking", JSON.stringify({ thinking: block.thinking || "", redacted: false }), chatId || null);
           if (!alreadyStreamed) {
             wsSend({ type: "thinking", thinking: block.thinking || "", redacted: false });
           } else {
             wsSend({ type: "thinking_end" });
           }
         } else if (block.type === "redacted_thinking") {
-          if (turnState.resolvedSid) addMessage(turnState.resolvedSid, "thinking", JSON.stringify({ thinking: "", redacted: true }), chatId || null);
           if (!alreadyStreamed) {
             wsSend({ type: "thinking", thinking: "", redacted: true });
           } else {
@@ -1029,7 +1035,6 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
           }
         } else if (block.type === "tool_use") {
           wsSend({ type: "tool", id: block.id, name: block.name, input: block.input });
-          if (turnState.resolvedSid) addMessage(turnState.resolvedSid, "tool", JSON.stringify({ id: block.id, name: block.name, input: block.input }), chatId || null);
         }
       }
       return;
@@ -1049,7 +1054,6 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
         if (sid) addCost(sid, sdkMsg.total_cost_usd || 0, sdkMsg.duration_ms || 0, sdkMsg.num_turns || 0, inputTokens, outputTokens, { model, stopReason: "success", isError: 0, cacheReadTokens, cacheCreationTokens });
         wsSend({ type: "result", duration_ms: sdkMsg.duration_ms, num_turns: sdkMsg.num_turns, cost_usd: sdkMsg.total_cost_usd, totalCost: getTotalCost(), input_tokens: inputTokens, output_tokens: outputTokens, cache_read_tokens: cacheReadTokens, cache_creation_tokens: cacheCreationTokens, model, stop_reason: "success", context_window: contextWindow, max_output_tokens: maxOutputTokens });
         turnState.lastChatMetrics = { durationMs: sdkMsg.duration_ms, costUsd: sdkMsg.total_cost_usd, inputTokens, outputTokens, model, turns: sdkMsg.num_turns, isError: false };
-        if (sid) addMessage(sid, "result", JSON.stringify({ duration_ms: sdkMsg.duration_ms, num_turns: sdkMsg.num_turns, cost_usd: sdkMsg.total_cost_usd, input_tokens: inputTokens, output_tokens: outputTokens, cache_read_tokens: cacheReadTokens, cache_creation_tokens: cacheCreationTokens, model, stop_reason: "success", context_window: contextWindow, max_output_tokens: maxOutputTokens }), chatId || null);
       } else if (sdkMsg.subtype === "error_max_turns") {
         const sid = turnState.resolvedSid;
         const inputTokens = sdkMsg.usage?.input_tokens || 0;
@@ -1078,7 +1082,6 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
         turnState.lastChatMetrics = { durationMs, costUsd, inputTokens, outputTokens, model, turns: numTurns, isError: true, error: errMsg };
         if (sid) {
           addCost(sid, costUsd, durationMs, numTurns, inputTokens, outputTokens, { model, stopReason: sdkMsg.subtype, isError: 1, cacheReadTokens, cacheCreationTokens });
-          addMessage(sid, "error", JSON.stringify({ error: errMsg, subtype: sdkMsg.subtype, duration_ms: durationMs, cost_usd: costUsd, model }), chatId || null);
         }
         wsSend({ type: "error", error: errMsg });
       }
@@ -1087,7 +1090,10 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
       turnState.turnComplete = true;
       wsSend({ type: "done" });
 
-      fireTurnNotifications(turnState, chatId, ws);
+      // Clean up global active query tracking
+      unregisterGlobalQuery(turnState.resolvedSid || clientSid, queryKey);
+
+      fireTurnNotifications(turnState, chatId, wsRef);
 
       return;
     }
@@ -1099,10 +1105,6 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
           const text = Array.isArray(block.content) ? block.content.map(c => c.type === "text" ? c.text : "").join("") : typeof block.content === "string" ? block.content : "";
           const wirePayload = { toolUseId: block.tool_use_id, content: text.slice(0, 2000), isError: block.is_error || false };
           wsSend({ type: "tool_result", ...wirePayload });
-          if (turnState.resolvedSid) {
-            const dbPayload = { toolUseId: block.tool_use_id, content: text.slice(0, 10000), isError: block.is_error || false };
-            addMessage(turnState.resolvedSid, "tool_result", JSON.stringify(dbPayload), chatId || null);
-          }
         }
       }
       return;
@@ -1114,9 +1116,6 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
     }
 
     if (sdkMsg.type === "abort") {
-      if (turnState.resolvedSid) {
-        addMessage(turnState.resolvedSid, "aborted", JSON.stringify({ aborted: true }), chatId || null);
-      }
       wsSend({ type: "aborted" });
       turnState.turnComplete = true;
       turnState.turnAborted = true;
@@ -1146,22 +1145,16 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
     }
   }
 
-  // Create the persistent session
+  // Create the persistent session and store the mutable WS reference for re-attachment
   createOrResumeSession(sessionKey, opts, onMessage);
+  setSessionWsRef(sessionKey, wsRef);
   pushToSession(sessionKey, message, images);
 
-  // Record user message in DB
-  if (clientSid) {
-    const userMsgData = { text: message };
-    if (images?.length) {
-      userMsgData.images = images.map(i => ({ name: i.name, data: i.data, mimeType: i.mimeType }));
-    }
-    addMessage(clientSid, "user", JSON.stringify(userMsgData), chatId || null);
-  }
 }
 
 // ── Per-turn notification/memory/summary handler ──────────────────────────
-function fireTurnNotifications(turnState, chatId, ws) {
+function fireTurnNotifications(turnState, chatId, wsRef) {
+  const ws = wsRef?.ws; // read current WS from mutable ref
   const { resolvedSid, lastAssistantText, lastChatMetrics, currentMessage, worktreeRecord } = turnState;
 
   const session = resolvedSid ? getSession(resolvedSid) : null;

@@ -3,18 +3,18 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // Mock @anthropic-ai/claude-agent-sdk
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   query: vi.fn(),
+  getSessionMessages: vi.fn(),
 }));
 
 // Mock db.js
 vi.mock("../../../db.js", () => ({
   getSession: vi.fn(),
-  getMessagesNoChatId: vi.fn(() => []),
   updateSessionSummary: vi.fn(),
 }));
 
 import { generateSessionSummary } from "../../../server/summarizer.js";
-import { query } from "@anthropic-ai/claude-agent-sdk";
-import { getSession, getMessagesNoChatId, updateSessionSummary } from "../../../db.js";
+import { query, getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
+import { getSession, updateSessionSummary } from "../../../db.js";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -30,13 +30,13 @@ describe("generateSessionSummary", () => {
   it("with missing session does not query messages", async () => {
     getSession.mockReturnValue(null);
     await generateSessionSummary("nonexistent");
-    expect(getMessagesNoChatId).not.toHaveBeenCalled();
+    expect(getSessionMessages).not.toHaveBeenCalled();
   });
 
   it("with < 2 parseable messages returns null", async () => {
     getSession.mockReturnValue({ id: "sess-1", title: "Test" });
-    getMessagesNoChatId.mockReturnValue([
-      { role: "user", content: JSON.stringify({ text: "Hello" }) },
+    getSessionMessages.mockResolvedValue([
+      { message: { role: "user", content: [{ type: "text", text: "Hello" }] }, session_id: "sess-1" },
     ]);
 
     const result = await generateSessionSummary("sess-1");
@@ -45,7 +45,7 @@ describe("generateSessionSummary", () => {
 
   it("with 0 messages returns null", async () => {
     getSession.mockReturnValue({ id: "sess-1", title: "Test" });
-    getMessagesNoChatId.mockReturnValue([]);
+    getSessionMessages.mockResolvedValue([]);
 
     const result = await generateSessionSummary("sess-1");
     expect(result).toBeNull();
@@ -53,9 +53,9 @@ describe("generateSessionSummary", () => {
 
   it("with valid conversation calls query and updates DB", async () => {
     getSession.mockReturnValue({ id: "sess-1", title: "Test Session" });
-    getMessagesNoChatId.mockReturnValue([
-      { role: "user", content: JSON.stringify({ text: "Fix the bug in auth" }) },
-      { role: "assistant", content: JSON.stringify({ text: "I fixed the authentication bug" }) },
+    getSessionMessages.mockResolvedValue([
+      { message: { role: "user", content: [{ type: "text", text: "Fix the bug in auth" }] }, session_id: "sess-1" },
+      { message: { role: "assistant", content: [{ type: "text", text: "I fixed the authentication bug" }] }, session_id: "sess-1" },
     ]);
 
     // Mock the async iterator returned by query
@@ -89,9 +89,9 @@ describe("generateSessionSummary", () => {
 
   it("summary truncated to 200 chars", async () => {
     getSession.mockReturnValue({ id: "sess-1", title: "Test" });
-    getMessagesNoChatId.mockReturnValue([
-      { role: "user", content: JSON.stringify({ text: "Do something" }) },
-      { role: "assistant", content: JSON.stringify({ text: "Done" }) },
+    getSessionMessages.mockResolvedValue([
+      { message: { role: "user", content: [{ type: "text", text: "Do something" }] }, session_id: "sess-1" },
+      { message: { role: "assistant", content: [{ type: "text", text: "Done" }] }, session_id: "sess-1" },
     ]);
 
     const longText = "A".repeat(300);
@@ -122,9 +122,9 @@ describe("generateSessionSummary", () => {
 
   it("SDK returns no text returns null", async () => {
     getSession.mockReturnValue({ id: "sess-1", title: "Test" });
-    getMessagesNoChatId.mockReturnValue([
-      { role: "user", content: JSON.stringify({ text: "Hello" }) },
-      { role: "assistant", content: JSON.stringify({ text: "World" }) },
+    getSessionMessages.mockResolvedValue([
+      { message: { role: "user", content: [{ type: "text", text: "Hello" }] }, session_id: "sess-1" },
+      { message: { role: "assistant", content: [{ type: "text", text: "World" }] }, session_id: "sess-1" },
     ]);
 
     // Return messages with no text blocks
@@ -153,14 +153,14 @@ describe("generateSessionSummary", () => {
 
   it("messages with unparseable JSON are skipped", async () => {
     getSession.mockReturnValue({ id: "sess-1", title: "Test" });
-    getMessagesNoChatId.mockReturnValue([
-      { role: "user", content: "not json at all" },
-      { role: "user", content: JSON.stringify({ text: "Valid message" }) },
-      { role: "assistant", content: "{bad json" },
-      { role: "assistant", content: JSON.stringify({ text: "Valid response" }) },
+    getSessionMessages.mockResolvedValue([
+      { message: { role: "user", content: [{ type: "tool_use" }] }, session_id: "sess-1" },
+      { message: { role: "user", content: [{ type: "text", text: "Valid message" }] }, session_id: "sess-1" },
+      { message: { role: "assistant", content: [{ type: "tool_result" }] }, session_id: "sess-1" },
+      { message: { role: "assistant", content: [{ type: "text", text: "Valid response" }] }, session_id: "sess-1" },
     ]);
 
-    // 2 parseable messages => should proceed
+    // 2 messages with text blocks => should proceed
     query.mockReturnValue({
       [Symbol.asyncIterator]: () => {
         let done = false;
@@ -188,12 +188,12 @@ describe("generateSessionSummary", () => {
 
   it("does not count messages without text field", async () => {
     getSession.mockReturnValue({ id: "sess-1", title: "Test" });
-    getMessagesNoChatId.mockReturnValue([
-      { role: "user", content: JSON.stringify({ image: "base64data" }) },
-      { role: "assistant", content: JSON.stringify({ toolUse: true }) },
+    getSessionMessages.mockResolvedValue([
+      { message: { role: "user", content: [{ type: "image" }] }, session_id: "sess-1" },
+      { message: { role: "assistant", content: [{ type: "tool_use" }] }, session_id: "sess-1" },
     ]);
 
-    // Both messages parse but have no "text" field => conversation.length < 2
+    // Both messages have no text content blocks => conversation.length < 2
     const result = await generateSessionSummary("sess-1");
     expect(result).toBeNull();
   });

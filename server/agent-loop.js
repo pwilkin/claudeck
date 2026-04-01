@@ -18,7 +18,6 @@ import {
   getSession,
   touchSession,
   addCost,
-  addMessage,
   getTotalCost,
   setClaudeSession,
   updateSessionTitle,
@@ -197,7 +196,6 @@ export async function runAgent({
         }
 
         agentSend({ type: "session", sessionId: ourSid });
-        addMessage(resolvedSid, "user", JSON.stringify({ text: `[Agent: ${agentDef.title}] ${agentDef.goal}` }), null);
         continue;
       }
 
@@ -207,9 +205,6 @@ export async function runAgent({
           if (block.type === "text" && block.text) {
             lastAssistantText += (lastAssistantText ? "\n\n" : "") + block.text;
             agentSend({ type: "text", text: block.text });
-            if (resolvedSid) {
-              addMessage(resolvedSid, "assistant", JSON.stringify({ text: block.text }), null);
-            }
           } else if (block.type === "tool_use") {
             turnCount++;
             agentSend({ type: "tool", id: block.id, name: block.name, input: block.input });
@@ -223,9 +218,6 @@ export async function runAgent({
                 ? (block.input.command || block.input.pattern || block.input.file_path || block.input.query || "").slice(0, 120)
                 : "",
             });
-            if (resolvedSid) {
-              addMessage(resolvedSid, "tool", JSON.stringify({ id: block.id, name: block.name, input: block.input }), null);
-            }
           }
         }
         continue;
@@ -245,13 +237,6 @@ export async function runAgent({
               content: text.slice(0, 2000),
               isError: block.is_error || false,
             });
-            if (resolvedSid) {
-              addMessage(resolvedSid, "tool_result", JSON.stringify({
-                toolUseId: block.tool_use_id,
-                content: text.slice(0, 10000),
-                isError: block.is_error || false,
-              }), null);
-            }
           }
         }
         continue;
@@ -340,7 +325,6 @@ export async function runAgent({
               cacheReadTokens,
               cacheCreationTokens,
             });
-            addMessage(resolvedSid, "error", JSON.stringify({ error: errMsg, subtype: sdkMsg.subtype }), null);
           }
 
           lastAgentMetrics = { durationMs, costUsd, inputTokens, outputTokens, model: resultModel, turns: numTurns, isError: true, error: errMsg };

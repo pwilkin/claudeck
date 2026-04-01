@@ -106,7 +106,12 @@ vi.mock("../../../server/session-manager.js", () => ({
   closeSession: vi.fn(),
   closeAllSessions: vi.fn(),
   closeSessionsForConnection: vi.fn(),
+  detachSessionsForConnection: vi.fn(),
   hasActiveSession: vi.fn(() => sessionManagerHasActive),
+  getSessionMeta: vi.fn(() => null),
+  setSessionWsRef: vi.fn(),
+  getSessionWsRef: vi.fn(() => null),
+  updateSessionCallback: vi.fn(() => false),
   setSessionModel: vi.fn(),
   setSessionPermissionMode: vi.fn(),
   getSessionCwd: vi.fn(),
@@ -762,18 +767,16 @@ describe("ws-handler", () => {
       expect(errMsg.error).toBe("Bad request");
     });
 
-    it("stores assistant text messages in DB via addMessage", async () => {
-      await sendChat({}, [
+    it("forwards assistant text messages over WS", async () => {
+      const { ws } = await sendChat({}, [
         { type: "system", subtype: "init", session_id: "cs-db", model: "claude-sonnet-4-6" },
         { type: "assistant", message: { content: [{ type: "text", text: "Stored text" }] } },
         { type: "result", subtype: "success", total_cost_usd: 0, duration_ms: 0, num_turns: 1, usage: {}, modelUsage: {} },
       ]);
 
-      expect(addMessage).toHaveBeenCalledWith(
-        "sid-1", "assistant",
-        expect.stringContaining("Stored text"),
-        null,
-      );
+      const textMsg = ws.messages.find((m) => m.type === "text");
+      expect(textMsg).toBeDefined();
+      expect(textMsg.text).toBe("Stored text");
     });
 
     it("sends tool_use blocks over WS and stores in DB", async () => {
@@ -790,15 +793,9 @@ describe("ws-handler", () => {
       expect(toolMsg.name).toBe("Read");
       expect(toolMsg.id).toBe("tu-1");
       expect(toolMsg.input).toEqual({ file_path: "/tmp/x" });
-
-      expect(addMessage).toHaveBeenCalledWith(
-        "sid-1", "tool",
-        expect.stringContaining("tu-1"),
-        null,
-      );
     });
 
-    it("sends tool_result blocks from user messages with truncated content", async () => {
+    it("sends tool_result blocks from user messages with truncated content over WS", async () => {
       const longContent = "x".repeat(5000);
       const { ws } = await sendChat({}, [
         { type: "system", subtype: "init", session_id: "cs-tr", model: "claude-sonnet-4-6" },
@@ -816,16 +813,6 @@ describe("ws-handler", () => {
       expect(trMsg.toolUseId).toBe("tu-r1");
       // WS gets truncated to 2000 chars
       expect(trMsg.content.length).toBe(2000);
-
-      // DB gets truncated to 10000 chars
-      expect(addMessage).toHaveBeenCalledWith(
-        "sid-1", "tool_result",
-        expect.any(String),
-        null,
-      );
-      const dbCall = addMessage.mock.calls.find((c) => c[1] === "tool_result");
-      const dbPayload = JSON.parse(dbCall[2]);
-      expect(dbPayload.content.length).toBe(5000); // original was 5000, under 10000 limit
     });
 
     it("tool_result with array content joins text blocks", async () => {
@@ -874,17 +861,13 @@ describe("ws-handler", () => {
       );
     });
 
-    it("stores user message in DB on init", async () => {
-      await sendChat({ message: "Test user message" }, [
+    it("completes chat flow with user message", async () => {
+      const { ws } = await sendChat({ message: "Test user message" }, [
         { type: "system", subtype: "init", session_id: "cs-um", model: "claude-sonnet-4-6" },
         { type: "result", subtype: "success", total_cost_usd: 0, duration_ms: 0, num_turns: 1, usage: {}, modelUsage: {} },
       ]);
 
-      expect(addMessage).toHaveBeenCalledWith(
-        "sid-1", "user",
-        expect.stringContaining("Test user message"),
-        null,
-      );
+      expect(ws.messages.find((m) => m.type === "done")).toBeDefined();
     });
 
     it("processes chat with title-less session without error", async () => {
@@ -1129,19 +1112,15 @@ describe("ws-handler", () => {
       expect(abortedMsg).toBeDefined();
     });
 
-    it("AbortError records aborted message in DB", async () => {
+    it("AbortError sends aborted message over WS", async () => {
       sessionManagerSimMessages = [
         { type: "system", subtype: "init", session_id: "cs-ab-db", model: "claude-sonnet-4-6" },
         { type: "abort" },
       ];
 
-      await sendChat({});
+      const { ws } = await sendChat({});
 
-      expect(addMessage).toHaveBeenCalledWith(
-        "sid-1", "aborted",
-        expect.any(String),
-        null,
-      );
+      expect(ws.messages.find((m) => m.type === "aborted")).toBeDefined();
     });
 
     // ── Stale session retry ────────────────────────────────────────────────
@@ -1884,7 +1863,7 @@ describe("ws-handler", () => {
       expect(errMsg.error).toBe("Unknown error");
     });
 
-    it("result message stores result record in DB", async () => {
+    it("result message sends result over WS with cost and model info", async () => {
       const wss = createMockWss();
       const sessionIds = new Map();
       setupWebSocket(wss, sessionIds);
@@ -1912,18 +1891,16 @@ describe("ws-handler", () => {
         permissionMode: "bypass",
       }));
 
-      // Verify result message stored in DB
-      const resultCall = addMessage.mock.calls.find((c) => c[1] === "result");
-      expect(resultCall).toBeDefined();
-      const resultData = JSON.parse(resultCall[2]);
-      expect(resultData.cost_usd).toBe(0.05);
-      expect(resultData.model).toBe("claude-sonnet-4-6");
-      expect(resultData.stop_reason).toBe("success");
-      expect(resultData.cache_read_tokens).toBe(50);
-      expect(resultData.cache_creation_tokens).toBe(25);
+      const resultMsg = ws.messages.find((m) => m.type === "result");
+      expect(resultMsg).toBeDefined();
+      expect(resultMsg.cost_usd).toBe(0.05);
+      expect(resultMsg.model).toBe("claude-sonnet-4-6");
+      expect(resultMsg.stop_reason).toBe("success");
+      expect(resultMsg.cache_read_tokens).toBe(50);
+      expect(resultMsg.cache_creation_tokens).toBe(25);
     });
 
-    it("error result stores error message in DB", async () => {
+    it("error result sends error over WS with error message", async () => {
       const wss = createMockWss();
       const sessionIds = new Map();
       setupWebSocket(wss, sessionIds);
@@ -1952,11 +1929,9 @@ describe("ws-handler", () => {
         permissionMode: "bypass",
       }));
 
-      const errorCall = addMessage.mock.calls.find((c) => c[1] === "error");
-      expect(errorCall).toBeDefined();
-      const errorData = JSON.parse(errorCall[2]);
-      expect(errorData.error).toBe("Service overloaded");
-      expect(errorData.subtype).toBe("error_overloaded");
+      const errMsg = ws.messages.find((m) => m.type === "error");
+      expect(errMsg).toBeDefined();
+      expect(errMsg.error).toBe("Service overloaded");
     });
 
     it("getTotalCost is included in result WS message", async () => {
@@ -2546,7 +2521,6 @@ describe("ws-handler", () => {
       await handleChat(makeMsg(), ctx);
 
       expect(createSession).toHaveBeenCalled();
-      expect(addMessage).toHaveBeenCalled();
       expect(addCost).toHaveBeenCalled();
       expect(ctx.ws.messages.find((m) => m.type === "done")).toBeDefined();
       expect(ctx.ws.messages.find((m) => m.type === "session")).toBeDefined();
@@ -2992,7 +2966,6 @@ describe("ws-handler", () => {
       const textMsg = ctx.sent.find((m) => m.type === "text");
       expect(textMsg).toBeDefined();
       expect(textMsg.text).toBe("Hello from stream");
-      expect(addMessage).toHaveBeenCalledWith("stream-sid", "assistant", expect.stringContaining("Hello from stream"), null, null);
     });
 
     it("tool_use forwarded via wsSend", async () => {
@@ -3412,13 +3385,8 @@ describe("ws-handler", () => {
         images: [{ name: "test.png", data: "base64data", mimeType: "image/png" }],
       }, ctx);
 
-      // Check that addMessage was called with image data in user message
-      const userMsgCall = addMessage.mock.calls.find((c) => c[1] === "user");
-      expect(userMsgCall).toBeDefined();
-      const userData = JSON.parse(userMsgCall[2]);
-      expect(userData.images).toBeDefined();
-      expect(userData.images).toHaveLength(1);
-      expect(userData.images[0].name).toBe("test.png");
+      // Verify the chat flow completes
+      expect(ctx.ws.messages.find((m) => m.type === "done")).toBeDefined();
     });
 
     it("sets session title from first user message when session has no title", async () => {
@@ -3584,11 +3552,8 @@ describe("ws-handler", () => {
 
       await processSdkStream(gen, ctx);
 
-      // Should save user message with step label
-      const userMsgCall = addMessage.mock.calls.find((c) => c[1] === "user");
-      expect(userMsgCall).toBeDefined();
-      const msgData = JSON.parse(userMsgCall[2]);
-      expect(msgData.text).toContain("Build step");
+      // Workflow step label is not stored in DB; session init should still be sent
+      expect(ctx.sent.find((m) => m.type === "session")).toBeDefined();
     });
 
     it("user tool_result messages are forwarded and stored", async () => {
