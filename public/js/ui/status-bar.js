@@ -101,6 +101,11 @@ document.getElementById("sb-project")?.addEventListener("click", () => {
   $.projectSelect?.focus();
 });
 
+// Click Whaly → toggle assistant bot panel
+document.getElementById("sb-bot")?.addEventListener("click", () => {
+  import('../panels/assistant-bot.js').then(({ togglePanel }) => togglePanel());
+});
+
 // ── Costs ──
 // Mirror the header cost values
 function syncCosts() {

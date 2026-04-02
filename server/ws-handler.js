@@ -34,6 +34,7 @@ import {
   updateSessionCallback,
   setSessionModel,
   setSessionPermissionMode,
+  getContextUsage,
 } from "./session-manager.js";
 
 // Map short model names to current model IDs
@@ -385,6 +386,23 @@ export function handleClose({ activeQueries, pendingApprovals, persistentSession
 }
 
 // ── Extracted handler: abort ──────────────────────────────────────────────
+export async function handleGetContextUsage(msg, { ws, persistentSessionKeys }) {
+  const sessionId = msg.sessionId;
+  if (!sessionId) return;
+
+  // Try to find the session key (may have chatId suffix)
+  const candidates = [sessionId, ...(persistentSessionKeys || []).filter(k => k.startsWith(sessionId))];
+  for (const key of candidates) {
+    const usage = await getContextUsage(key);
+    if (usage) {
+      ws.send(JSON.stringify({ type: "context_usage", ...usage }));
+      return;
+    }
+  }
+  // No active session — send empty response so client knows
+  ws.send(JSON.stringify({ type: "context_usage", totalTokens: 0, maxTokens: 0, percentage: 0, categories: [] }));
+}
+
 export function handleAbort(msg, { ws, activeQueries, pendingApprovals, persistentSessionKeys }) {
   if (msg.chatId) {
     // Try abort via session manager for persistent sessions
@@ -1051,7 +1069,7 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
         const modelUsageEntry = sdkMsg.modelUsage?.[model] || {};
         const contextWindow = modelUsageEntry.contextWindow || null;
         const maxOutputTokens = modelUsageEntry.maxOutputTokens || null;
-        if (sid) addCost(sid, sdkMsg.total_cost_usd || 0, sdkMsg.duration_ms || 0, sdkMsg.num_turns || 0, inputTokens, outputTokens, { model, stopReason: "success", isError: 0, cacheReadTokens, cacheCreationTokens });
+        if (sid) addCost(sid, sdkMsg.total_cost_usd || 0, sdkMsg.duration_ms || 0, sdkMsg.num_turns || 0, inputTokens, outputTokens, { model, stopReason: "success", isError: 0, cacheReadTokens, cacheCreationTokens, contextWindow });
         wsSend({ type: "result", duration_ms: sdkMsg.duration_ms, num_turns: sdkMsg.num_turns, cost_usd: sdkMsg.total_cost_usd, totalCost: getTotalCost(), input_tokens: inputTokens, output_tokens: outputTokens, cache_read_tokens: cacheReadTokens, cache_creation_tokens: cacheCreationTokens, model, stop_reason: "success", context_window: contextWindow, max_output_tokens: maxOutputTokens });
         turnState.lastChatMetrics = { durationMs: sdkMsg.duration_ms, costUsd: sdkMsg.total_cost_usd, inputTokens, outputTokens, model, turns: sdkMsg.num_turns, isError: false };
       } else if (sdkMsg.subtype === "error_max_turns") {
@@ -1064,7 +1082,7 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
         const modelUsageEntry = sdkMsg.modelUsage?.[model] || {};
         const contextWindow = modelUsageEntry.contextWindow || null;
         const maxOutputTokens = modelUsageEntry.maxOutputTokens || null;
-        if (sid) addCost(sid, sdkMsg.total_cost_usd || 0, sdkMsg.duration_ms || 0, sdkMsg.num_turns || 0, inputTokens, outputTokens, { model, stopReason: "error_max_turns", isError: 0, cacheReadTokens, cacheCreationTokens });
+        if (sid) addCost(sid, sdkMsg.total_cost_usd || 0, sdkMsg.duration_ms || 0, sdkMsg.num_turns || 0, inputTokens, outputTokens, { model, stopReason: "error_max_turns", isError: 0, cacheReadTokens, cacheCreationTokens, contextWindow });
         wsSend({ type: "result", duration_ms: sdkMsg.duration_ms, num_turns: sdkMsg.num_turns, cost_usd: sdkMsg.total_cost_usd, totalCost: getTotalCost(), input_tokens: inputTokens, output_tokens: outputTokens, cache_read_tokens: cacheReadTokens, cache_creation_tokens: cacheCreationTokens, model, stop_reason: "error_max_turns", context_window: contextWindow, max_output_tokens: maxOutputTokens });
         wsSend({ type: "error", error: `Reached max turns limit (${sdkMsg.num_turns}). Send another message to continue.` });
       } else if (sdkMsg.subtype?.startsWith("error")) {
@@ -1089,6 +1107,13 @@ export async function handleChat(msg, { ws, sessionIds, activeQueries, pendingAp
       // Turn is complete — send done, fire notifications, capture memories
       turnState.turnComplete = true;
       wsSend({ type: "done" });
+
+      // Send live context usage from the SDK (accurate context window + token count)
+      getContextUsage(sessionKey).then(usage => {
+        if (usage && wsRef.ws && wsRef.ws.readyState === 1) {
+          wsSend({ type: "context_usage", ...usage });
+        }
+      }).catch(() => {});
 
       // Clean up global active query tracking
       unregisterGlobalQuery(turnState.resolvedSid || clientSid, queryKey);
@@ -1278,6 +1303,7 @@ export function setupWebSocket(wss, sessionIds) {
       if (msg.type === "agent_dag") return handleDag(msg, ctx);
       if (msg.type === "orchestrate") return handleOrchestrate(msg, ctx);
       if (msg.type === "chat") return handleChat(msg, ctx);
+      if (msg.type === "get_context_usage") return handleGetContextUsage(msg, ctx);
     });
   });
 }

@@ -71,6 +71,7 @@ try { db.exec(`ALTER TABLE costs ADD COLUMN stop_reason TEXT DEFAULT NULL`); } c
 try { db.exec(`ALTER TABLE costs ADD COLUMN is_error INTEGER DEFAULT 0`); } catch { /* exists */ }
 try { db.exec(`ALTER TABLE costs ADD COLUMN cache_read_tokens INTEGER DEFAULT 0`); } catch { /* exists */ }
 try { db.exec(`ALTER TABLE costs ADD COLUMN cache_creation_tokens INTEGER DEFAULT 0`); } catch { /* exists */ }
+try { db.exec(`ALTER TABLE costs ADD COLUMN context_window INTEGER DEFAULT NULL`); } catch { /* exists */ }
 // New columns for messages table (workflow metadata)
 try { db.exec(`ALTER TABLE messages ADD COLUMN workflow_id TEXT DEFAULT NULL`); } catch { /* exists */ }
 try { db.exec(`ALTER TABLE messages ADD COLUMN workflow_step_index INTEGER DEFAULT NULL`); } catch { /* exists */ }
@@ -279,7 +280,7 @@ const stmts = {
     `UPDATE sessions SET last_used_at = unixepoch() WHERE id = ?`
   ),
   addCost: db.prepare(
-    `INSERT INTO costs (session_id, cost_usd, duration_ms, num_turns, input_tokens, output_tokens, model, stop_reason, is_error, cache_read_tokens, cache_creation_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO costs (session_id, cost_usd, duration_ms, num_turns, input_tokens, output_tokens, model, stop_reason, is_error, cache_read_tokens, cache_creation_tokens, context_window) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ),
   addMessage: db.prepare(
     `INSERT INTO messages (session_id, role, content, chat_id, workflow_id, workflow_step_index, workflow_step_label) VALUES (?, ?, ?, ?, ?, ?, ?)`
@@ -425,6 +426,10 @@ const stmts = {
      FROM costs c JOIN sessions s ON c.session_id = s.id
      WHERE s.project_path = ?`
   ),
+  getLastCostForSession: db.prepare(
+    `SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, model, context_window
+     FROM costs WHERE session_id = ? ORDER BY id DESC LIMIT 1`
+  ),
 };
 
 export function createSession(id, claudeSessionId, projectName, projectPath) {
@@ -450,8 +455,8 @@ export function touchSession(id) {
   stmts.touchSession.run(id);
 }
 
-export function addCost(sessionId, costUsd, durationMs, numTurns, inputTokens = 0, outputTokens = 0, { model = null, stopReason = null, isError = 0, cacheReadTokens = 0, cacheCreationTokens = 0 } = {}) {
-  stmts.addCost.run(sessionId, costUsd, durationMs, numTurns, inputTokens, outputTokens, model, stopReason, isError, cacheReadTokens, cacheCreationTokens);
+export function addCost(sessionId, costUsd, durationMs, numTurns, inputTokens = 0, outputTokens = 0, { model = null, stopReason = null, isError = 0, cacheReadTokens = 0, cacheCreationTokens = 0, contextWindow = null } = {}) {
+  stmts.addCost.run(sessionId, costUsd, durationMs, numTurns, inputTokens, outputTokens, model, stopReason, isError, cacheReadTokens, cacheCreationTokens, contextWindow);
 }
 
 export function getTotalCost() {
@@ -614,6 +619,10 @@ export function getTotalTokens() {
 
 export function getProjectTokens(projectPath) {
   return stmts.getProjectTokens.get(projectPath);
+}
+
+export function getLastCostForSession(sessionId) {
+  return stmts.getLastCostForSession.get(sessionId) || null;
 }
 
 // ── Error categorization CASE (reused in multiple queries) ────

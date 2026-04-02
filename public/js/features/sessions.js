@@ -239,6 +239,11 @@ export async function loadMessages(sid) {
     const messages = await api.fetchSingleMessages(sid);
     renderMessagesIntoPane(messages, pane);
     loadContextGauge(sid);
+    // Request live context usage from SDK if session is still active
+    const ws = getState("ws");
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "get_context_usage", sessionId: sid }));
+    }
   } catch (err) {
     console.error("Failed to load messages:", err);
   }

@@ -56,6 +56,7 @@ import './ui/input-meta.js';
 import './ui/right-panel.js';
 import './ui/header-dropdowns.js';
 import './ui/context-gauge.js';
+import './ui/file-autocomplete.js';
 import './ui/shortcuts.js';
 import './ui/sidebar-toggle.js';
 import './features/voice-input.js';

@@ -102,23 +102,13 @@ describe("assistant-bot", () => {
     expect(true).toBe(true);
   });
 
-  it("creates bot bubble element in document.body", () => {
-    const bubble = document.querySelector(".bot-bubble");
-    expect(bubble).not.toBeNull();
-    expect(bubble.parentElement).toBe(document.body);
-  });
-
-  it("creates bot panel element in document.body", () => {
+  it("creates bot panel element in document.body (no floating bubble)", () => {
     const panel = document.querySelector(".bot-panel");
     expect(panel).not.toBeNull();
     expect(panel.parentElement).toBe(document.body);
-  });
-
-  it("bot bubble contains the whaly image", () => {
+    // Floating bubble was removed — trigger is now in the status bar
     const bubble = document.querySelector(".bot-bubble");
-    const img = bubble.querySelector("img");
-    expect(img).not.toBeNull();
-    expect(img.getAttribute("src")).toBe("/icons/whaly.png");
+    expect(bubble).toBeNull();
   });
 
   it("bot panel has messages area, input, send and stop buttons", () => {

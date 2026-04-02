@@ -36,13 +36,6 @@ function getCurrentProject() {
 // ── DOM creation ────────────────────────────────────────
 
 function createBotDOM() {
-  // Bubble
-  const bubble = document.createElement('button');
-  bubble.className = 'bot-bubble';
-  bubble.innerHTML = '<img src="/icons/whaly.png" alt="Whaly" width="32" height="32">';
-  bubble.title = 'Assistant Bot';
-  bubble.addEventListener('click', togglePanel);
-
   // Panel
   panel = document.createElement('div');
   panel.className = 'bot-panel';
@@ -75,7 +68,6 @@ function createBotDOM() {
     </div>
   `;
 
-  document.body.appendChild(bubble);
   document.body.appendChild(panel);
 
   // Cache DOM references
@@ -111,7 +103,7 @@ function createBotDOM() {
 
 // ── Panel toggle ────────────────────────────────────────
 
-function togglePanel() {
+export function togglePanel() {
   if (panel.classList.contains('open')) {
     closePanel();
   } else {

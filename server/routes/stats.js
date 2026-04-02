@@ -11,6 +11,7 @@ import {
   getErrorCategories, getErrorTimeline, getErrorsByTool, getRecentErrors,
   getModelUsage, getCacheEfficiency, getYearlyActivity,
   getAgentRunsOverview, getAgentRunsSummary, getAgentRunsByType, getAgentRunsDaily, getAgentRunsRecent,
+  getLastCostForSession,
 } from "../../db.js";
 
 const router = Router();
@@ -150,6 +151,16 @@ router.get("/", (req, res) => {
     const totalCost = getTotalCost();
     const projectCost = projectPath ? getProjectCost(projectPath) : null;
     res.json({ totalCost, projectCost });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Last cost entry for a session — used to restore context gauge
+router.get("/session-cost/:id", (req, res) => {
+  try {
+    const row = getLastCostForSession(req.params.id);
+    res.json(row || {});
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

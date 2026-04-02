@@ -4,6 +4,7 @@ import { getState, setState } from '../core/store.js';
 import { CHAT_IDS, BOT_CHAT_ID } from '../core/constants.js';
 import { on } from '../core/events.js';
 import { commandRegistry, dismissAutocomplete, handleAutocompleteKeydown, handleSlashAutocomplete, registerCommand } from '../ui/commands.js';
+import { handleFileAutocompleteKeydown, handleFileAutocomplete } from '../ui/file-autocomplete.js';
 import { addUserMessage, appendAssistantText, appendToolIndicator, appendToolResult, appendThinkingBlock, startThinkingBlock, appendThinkingDelta, endThinkingBlock, showThinking, removeThinking, addResultSummary, addStatus, showWhalyPlaceholder, addSkillUsedMessage } from '../ui/messages.js';
 import { getPane, panes, _setChatFns, _setInputHistoryGetter } from '../ui/parallel.js';
 import { loadSessions } from './sessions.js';
@@ -23,7 +24,7 @@ import { enqueuePermissionRequest, getPermissionMode, clearSessionPermissions, h
 import { getSelectedModel } from '../ui/model-selector.js';
 import { getMaxTurns } from '../ui/max-turns.js';
 import { getDisabledTools } from '../ui/disabled-tools.js';
-import { updateContextGauge, resetContextGauge, loadContextGauge } from '../ui/context-gauge.js';
+import { updateContextGauge, updateContextGaugeLive, resetContextGauge, loadContextGauge } from '../ui/context-gauge.js';
 import { updateSessionUsage, resetSessionUsage } from '../ui/session-usage.js';
 import { InputHistory, handleHistoryKeydown } from './input-history.js';
 
@@ -130,7 +131,29 @@ function hideWaitingForInput(pane) {
   if (inputBar) inputBar.classList.remove("waiting-for-input");
 }
 
-export function sendMessage(pane) {
+/** Extract @file/path references from message text */
+function extractAtMentions(text) {
+  const mentions = [];
+  const re = /@([\w./_-][\w./_-]*)/g;
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    mentions.push(match[1]);
+  }
+  return mentions;
+}
+
+/** Fetch file contents for @ mentions, returning file blocks */
+async function resolveAtMentions(mentions, cwd) {
+  if (mentions.length === 0) return [];
+  const results = await Promise.allSettled(
+    mentions.map(path => api.fetchFileContent(cwd, path))
+  );
+  return results
+    .filter(r => r.status === 'fulfilled' && r.value?.content)
+    .map(r => ({ path: r.value.path, content: r.value.content }));
+}
+
+export async function sendMessage(pane) {
   pane = pane || getPane(null);
   // Re-sync history key in case project loaded after module init
   const ek = historyKey();
@@ -193,18 +216,23 @@ export function sendMessage(pane) {
     }
   }
 
+  // Resolve @ file mentions
+  const atMentions = extractAtMentions(text);
+  const resolvedMentions = await resolveAtMentions(atMentions, cwd);
+
   // Prepend attached files
   let fullMessage = text;
   const attachedFiles = getState("attachedFiles");
-  if (attachedFiles.length > 0) {
-    const fileBlocks = attachedFiles.map(
+  const allFiles = [...attachedFiles, ...resolvedMentions];
+  if (allFiles.length > 0) {
+    const fileBlocks = allFiles.map(
       (f) => `<file path="${f.path}">\n${f.content}\n</file>`
     ).join("\n\n");
     fullMessage = fileBlocks + "\n\n" + text;
   }
 
   const images = getImageAttachments();
-  const filePaths = attachedFiles.map(f => f.path);
+  const filePaths = allFiles.map(f => f.path);
   addUserMessage(text, pane, images, filePaths);
   inputHistory.add(text);
   inputHistory.reset();
@@ -437,14 +465,19 @@ function handleServerMessage(msg) {
   removeThinking(pane);
 
   switch (msg.type) {
-    case "session":
+    case "session": {
+      const prevSid = getState("sessionId");
       setState("sessionId", msg.sessionId);
-      resetContextGauge();
-      resetSessionUsage();
+      // Only reset usage displays for genuinely new sessions, not continued ones
+      if (msg.sessionId !== prevSid) {
+        resetContextGauge();
+        resetSessionUsage();
+      }
       hideWaitingForInput(pane);
       loadSessions();
       showThinking("Thinking...", pane);
       break;
+    }
 
     case "text":
       appendAssistantText(msg.text, pane);
@@ -485,6 +518,13 @@ function handleServerMessage(msg) {
 
     case "rate_limit":
       updateSessionUsage(msg);
+      break;
+
+    case "context_usage":
+      // Live context usage from SDK — accurate context window and token count
+      if (msg.maxTokens > 0) {
+        updateContextGaugeLive(msg.totalTokens, msg.maxTokens, msg.percentage, msg.categories);
+      }
       break;
 
     case "result":
@@ -1082,6 +1122,7 @@ $.stopBtn.addEventListener("click", () => stopGeneration(getPane(null)));
 
 $.messageInput.addEventListener("keydown", (e) => {
   if (handleAutocompleteKeydown(e, getPane(null))) return;
+  if (handleFileAutocompleteKeydown(e, getPane(null))) return;
   if (handleHistoryKeydown(e, getPane(null), inputHistory)) return;
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
@@ -1094,6 +1135,7 @@ $.messageInput.addEventListener("input", () => {
   $.messageInput.style.height = "auto";
   $.messageInput.style.height = Math.min($.messageInput.scrollHeight, 200) + "px";
   handleSlashAutocomplete(getPane(null));
+  handleFileAutocomplete(getPane(null));
 });
 
 // ── History button + popover ──

@@ -96,10 +96,10 @@ describe("context-gauge", () => {
       expect(mockContextGaugeLabel.textContent).not.toContain("150");
     });
 
-    it("renders gauge label with formatted tokens", () => {
+    it("renders gauge label with formatted tokens (input-only for context)", () => {
       updateContextGauge(1500, 500, 0, 0);
-      // total = 2000, limit = 200000, pct = 1%
-      expect(mockContextGaugeLabel.textContent).toBe("2.0k/200.0k · 1%");
+      // totalInput = input + cacheRead + cacheCreation = 1500, limit = 200000, pct = 1%
+      expect(mockContextGaugeLabel.textContent).toBe("1.5k/200.0k · 1%");
     });
 
     it("sets gauge fill width as percentage", () => {

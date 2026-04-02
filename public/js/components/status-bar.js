@@ -19,6 +19,10 @@ class StatusBar extends HTMLElement {
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
         <span id="sb-project-name">no project</span>
       </span>
+      <span class="sb-sep"></span>
+      <span class="sb-item sb-bot" id="sb-bot" title="Assistant Bot">
+        <img src="/icons/whaly.png" alt="Whaly" width="14" height="14" style="opacity:0.7;transition:opacity 0.15s">
+      </span>
     </div>
     <div class="status-bar-center">
       <span class="sb-item sb-activity" id="sb-activity"></span>

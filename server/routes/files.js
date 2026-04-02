@@ -164,8 +164,8 @@ router.get("/search", async (req, res) => {
         const relPath = relDir ? posix.join(relDir, entry.name) : entry.name;
         const isDir = entry.isDirectory();
 
-        // Match name (case-insensitive, like SQL LIKE %q%)
-        if (entry.name.toLowerCase().includes(q)) {
+        // Match name or path (case-insensitive, like SQL LIKE %q%)
+        if (entry.name.toLowerCase().includes(q) || relPath.toLowerCase().includes(q)) {
           results.push({ name: entry.name, path: relPath, type: isDir ? "dir" : "file" });
         }
 

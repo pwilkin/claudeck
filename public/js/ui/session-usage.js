@@ -19,8 +19,9 @@ function renderSessionUsage(info) {
 
   const { status, utilization, resetsAt, rateLimitType } = info;
 
-  if (utilization == null) return;
-  const pct = Math.min(utilization * 100, 100);
+  // Show the bar if we have any meaningful rate limit info
+  if (utilization == null && !status) return;
+  const pct = Math.min((utilization || 0) * 100, 100);
 
   const isWarning = status === 'allowed_warning' || pct >= 75;
   const isCritical = status === 'rejected' || pct >= 90;

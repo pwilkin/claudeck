@@ -3,6 +3,7 @@ import { $ } from '../core/dom.js';
 import { getState, setState } from '../core/store.js';
 import { CHAT_IDS } from '../core/constants.js';
 import { handleAutocompleteKeydown, handleSlashAutocomplete } from './commands.js';
+import { handleFileAutocompleteKeydown, handleFileAutocomplete, dismissFileAutocomplete } from './file-autocomplete.js';
 import { handleHistoryKeydown } from '../features/input-history.js';
 
 // Panes map — chatId -> pane state object
@@ -25,6 +26,8 @@ export function initSinglePane() {
     currentAssistantMsg: null,
     autocompleteEl: document.getElementById("slash-autocomplete"),
     _autocompleteIndex: -1,
+    fileAutocompleteEl: document.getElementById("file-autocomplete"),
+    _fileAutocompleteIndex: -1,
   });
 }
 
@@ -75,6 +78,10 @@ export function createChatPane(chatId, index) {
   paneAutocomplete.className = "slash-autocomplete hidden";
   inputBar.appendChild(paneAutocomplete);
 
+  const paneFileAutocomplete = document.createElement("div");
+  paneFileAutocomplete.className = "file-autocomplete hidden";
+  inputBar.appendChild(paneFileAutocomplete);
+
   container.appendChild(inputBar);
 
   const state = {
@@ -88,6 +95,8 @@ export function createChatPane(chatId, index) {
     statusEl: header.querySelector(".chat-pane-status"),
     autocompleteEl: paneAutocomplete,
     _autocompleteIndex: -1,
+    fileAutocompleteEl: paneFileAutocomplete,
+    _fileAutocompleteIndex: -1,
   };
 
   paneSendBtn.addEventListener("click", () => sendMessage(state));
@@ -95,6 +104,7 @@ export function createChatPane(chatId, index) {
 
   textarea.addEventListener("keydown", (e) => {
     if (handleAutocompleteKeydown(e, state)) return;
+    if (handleFileAutocompleteKeydown(e, state)) return;
     // Lazy import to avoid circular dependency — getInputHistory is set by chat.js
     const history = _getInputHistory();
     if (history && handleHistoryKeydown(e, state, history)) return;
@@ -110,6 +120,7 @@ export function createChatPane(chatId, index) {
     textarea.style.height = "auto";
     textarea.style.height = Math.min(textarea.scrollHeight, 80) + "px";
     handleSlashAutocomplete(state);
+    handleFileAutocomplete(state);
   });
 
   return { container, state };

@@ -229,6 +229,16 @@ export function setSessionPermissionMode(sessionKey, mode) {
   }
 }
 
+export async function getContextUsage(sessionKey) {
+  const session = sessions.get(sessionKey);
+  if (!session?.query?.getContextUsage) return null;
+  try {
+    return await session.query.getContextUsage();
+  } catch {
+    return null;
+  }
+}
+
 export function getSessionKeys() {
   return [...sessions.keys()];
 }

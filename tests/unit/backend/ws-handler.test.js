@@ -116,6 +116,7 @@ vi.mock("../../../server/session-manager.js", () => ({
   setSessionPermissionMode: vi.fn(),
   getSessionCwd: vi.fn(),
   getSessionKeys: vi.fn(() => []),
+  getContextUsage: vi.fn(() => Promise.resolve(null)),
 }));
 
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
