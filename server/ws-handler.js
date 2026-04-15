@@ -391,7 +391,7 @@ export async function handleGetContextUsage(msg, { ws, persistentSessionKeys }) 
   if (!sessionId) return;
 
   // Try to find the session key (may have chatId suffix)
-  const candidates = [sessionId, ...(persistentSessionKeys || []).filter(k => k.startsWith(sessionId))];
+  const candidates = [sessionId, ...(persistentSessionKeys || []).filter(k => k && k.startsWith(sessionId))];
   for (const key of candidates) {
     const usage = await getContextUsage(key);
     if (usage) {
@@ -406,7 +406,7 @@ export async function handleGetContextUsage(msg, { ws, persistentSessionKeys }) 
 export function handleAbort(msg, { ws, activeQueries, pendingApprovals, persistentSessionKeys }) {
   if (msg.chatId) {
     // Try abort via session manager for persistent sessions
-    const key = persistentSessionKeys?.find(k => k.endsWith(`::${msg.chatId}`));
+    const key = persistentSessionKeys?.find(k => k && k.endsWith(`::${msg.chatId}`));
     if (key) {
       smAbortSession(key);
     } else {
